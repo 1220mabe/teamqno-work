@@ -12,6 +12,10 @@ on:
         description: "Also announce and post new tournaments (a scheduled run always does)"
         type: boolean
         default: true
+      catchup_days:
+        description: "1 = treat today's tournaments as new, 2 = yesterday's and today's (to announce what a halt skipped; the ledgers stop repeats)"
+        type: string
+        default: "0"
 
 permissions: {}
 
@@ -371,6 +375,13 @@ jobs:
             f=$(basename "$dir")
             curl -fsS --max-time 15 --retry 2 "https://teamqno.work/api/v1/tournaments/$f/index.json" -o "prev-indexes/$f.json" || rm -f "prev-indexes/$f.json"
           done
+          # Catch-up after a halt: forget the newest days, so those tournaments count as new. The announce cap still
+          # applies and the X and social ledgers skip anything already posted.
+          days="${{ inputs.catchup_days }}"
+          case "$days" in 1|2) cutoff=$(date -u -d "$((days - 1)) days ago" +%F)
+            for f in prev-indexes/*.json; do [ -f "$f" ] && jq --arg c "$cutoff" 'if .events then .events |= map(select(.date < $c)) else . end' "$f" > "$f.tmp" && mv "$f.tmp" "$f"; done
+            # The news index is left alone: reports are announced by their own rule.
+            ;; esac
           # The Journal reports that were live: the ones not in it are new (a missing file announces no report).
           curl -fsS --max-time 15 --retry 2 "https://teamqno.work/api/v1/news/index.json" -o prev-indexes/news-index.json || rm -f prev-indexes/news-index.json
       - uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4
