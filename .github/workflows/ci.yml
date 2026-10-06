@@ -292,9 +292,9 @@ jobs:
           # What is live now: the banned lists (a ban is a difference from them) and the Journal reports (a ban report
           # cannot be rebuilt from the data, so it is carried over). A failed fetch removes the file: no ban news, nothing lost.
           mkdir -p data ../apps/web/public/api/v1/news
-          curl -fsS --max-time 20 --retry 2 "https://teamqno.work/api/v1/legality.json" -o data/legality-before.json || rm -f data/legality-before.json
+          curl -fsS --max-time 20 --retry 2 "https://sideboard-sage.pages.dev/api/v1/legality.json" -o data/legality-before.json || rm -f data/legality-before.json
           for f in standard modern pioneer legacy vintage pauper; do
-            curl -fsS --max-time 20 --retry 2 "https://teamqno.work/api/v1/news/$f.json" -o "../apps/web/public/api/v1/news/$f.json" || rm -f "../apps/web/public/api/v1/news/$f.json"
+            curl -fsS --max-time 20 --retry 2 "https://sideboard-sage.pages.dev/api/v1/news/$f.json" -o "../apps/web/public/api/v1/news/$f.json" || rm -f "../apps/web/public/api/v1/news/$f.json"
           done
           uv run python -m sideboard_sage_pipeline cards
           uv run python -m sideboard_sage_pipeline api
@@ -373,7 +373,7 @@ jobs:
           mkdir -p prev-indexes
           for dir in out/api/v1/tournaments/*/; do
             f=$(basename "$dir")
-            curl -fsS --max-time 15 --retry 2 "https://teamqno.work/api/v1/tournaments/$f/index.json" -o "prev-indexes/$f.json" || rm -f "prev-indexes/$f.json"
+            curl -fsS --max-time 15 --retry 2 "https://sideboard-sage.pages.dev/api/v1/tournaments/$f/index.json" -o "prev-indexes/$f.json" || rm -f "prev-indexes/$f.json"
           done
           # Catch-up after a halt: forget the newest days, so those tournaments count as new. The announce cap still
           # applies and the X and social ledgers skip anything already posted.
@@ -383,7 +383,7 @@ jobs:
             # The news index is left alone: reports are announced by their own rule.
             ;; esac
           # The Journal reports that were live: the ones not in it are new (a missing file announces no report).
-          curl -fsS --max-time 15 --retry 2 "https://teamqno.work/api/v1/news/index.json" -o prev-indexes/news-index.json || rm -f prev-indexes/news-index.json
+          curl -fsS --max-time 15 --retry 2 "https://sideboard-sage.pages.dev/api/v1/news/index.json" -o prev-indexes/news-index.json || rm -f prev-indexes/news-index.json
       - uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
