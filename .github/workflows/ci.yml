@@ -205,11 +205,11 @@ jobs:
     needs: [ref, site]
     if: ${{ needs.ref.outputs.tested != 'true' }}
     runs-on: ubuntu-latest
-    # Every spec still runs; two runners each take half (the longest job on the critical path).
+    # Every spec still runs; three runners each take a third (the longest job on the critical path).
     strategy:
       fail-fast: false
       matrix:
-        shard: ["1/2", "2/2"]
+        shard: ["1/3", "2/3", "3/3"]
     defaults:
       run:
         working-directory: apps/web
