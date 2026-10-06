@@ -17,7 +17,8 @@ jobs:
     steps:
       - name: Check the pages, every format's data, and how fresh it is
         run: |
-          base="${{ vars.SITE_URL }}"
+          # The public domain answers 403 to the runner (bot rules), so the probe goes to the pages.dev copy of the same deploy.
+          base="https://sideboard-sage.pages.dev"
           curl -fsS --retry 3 --retry-delay 10 -o /dev/null "$base/"
           curl -fsS --retry 3 --retry-delay 10 -o /dev/null "$base/tournaments/"
           curl -fsS --retry 3 --retry-delay 10 "$base/api/v1/status.json" -o status.json
