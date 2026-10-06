@@ -1,0 +1,33 @@
+name: X post test
+
+# PUBLISHES ONE REAL POST on the X account (an image and a reply, clearly marked as a test) and costs a few cents of
+# X credits. Run it by hand only: Actions, X post test, Run workflow. It never runs on a schedule or a push.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      X_API_KEY: ${{ secrets.X_API_KEY }}
+      X_API_SECRET: ${{ secrets.X_API_SECRET }}
+      X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+      X_ACCESS_SECRET: ${{ secrets.X_ACCESS_SECRET }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Post a test message
+        working-directory: apps/web
+        run: |
+          if [ -z "$X_API_KEY" ] || [ -z "$X_API_SECRET" ] || [ -z "$X_ACCESS_TOKEN" ] || [ -z "$X_ACCESS_SECRET" ]; then echo "The four X secrets are not all set"; exit 1; fi
+          node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/x-post.mjs --test --ledger "$RUNNER_TEMP/ledger.json"

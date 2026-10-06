@@ -1,0 +1,25 @@
+name: Keep alive
+
+# GitHub pauses scheduled workflows in a public repository after 60 days without activity. One small commit a month
+# keeps the schedules running.
+on:
+  schedule:
+    - cron: "11 6 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  touch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - run: |
+          date -u +%F > .keepalive
+          git config user.name "keepalive-bot"
+          git config user.email "keepalive-bot@users.noreply.github.com"
+          git add .keepalive
+          git commit -q -m "Keep alive $(date -u +%F)"
+          git push -q

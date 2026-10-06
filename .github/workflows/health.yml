@@ -1,0 +1,70 @@
+name: Health
+
+# Checks the live site every 6 hours and, when something is wrong, sends a Discord message, so a problem
+# is visible without anyone watching (a public Issue would show it to everyone). GitHub also emails the owner about failed scheduled runs.
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  site:
+    if: vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the pages, every format's data, and how fresh it is
+        run: |
+          base="${{ vars.SITE_URL }}"
+          curl -fsS --retry 3 --retry-delay 10 -o /dev/null "$base/"
+          curl -fsS --retry 3 --retry-delay 10 -o /dev/null "$base/tournaments/"
+          curl -fsS --retry 3 --retry-delay 10 "$base/api/v1/status.json" -o status.json
+          curl -fsS --retry 3 --retry-delay 10 "$base/api/v1/news/index.json" -o news.json
+          for f in standard modern pioneer legacy vintage pauper; do
+            curl -fsS --retry 3 --retry-delay 10 "$base/api/v1/metagame/$f.json" -o "m-$f.json"
+            curl -fsS --retry 3 --retry-delay 10 "$base/api/v1/tournaments/$f/index.json" -o "t-$f.json"
+          done
+          python3 - <<'PY'
+          import json, sys
+          from datetime import datetime, timezone, timedelta
+          now = datetime.now(timezone.utc)
+          problems = []
+          s = json.load(open("status.json"))
+          if s["counts"]["cards"] < 20000:
+              problems.append("card count too low")
+          for f in ["standard", "modern", "pioneer", "legacy", "vintage", "pauper"]:
+              m = json.load(open(f"m-{f}.json"))
+              age = now - datetime.fromisoformat(m["generated_at"])
+              print(f, "decks", m["decks"], "age", age)
+              if age > timedelta(hours=14):  # refreshed every 4 hours; three missed runs is the alarm
+                  problems.append(f"{f} data is {age} old")
+              if m["decks"] < 150:
+                  problems.append(f"{f} has only {m['decks']} decks")
+          # generated_at is the build time, so a stalled source cannot show there: look at the newest event itself (#110).
+          newest = ""
+          for f in ["standard", "modern", "pioneer", "legacy", "vintage", "pauper"]:
+              t = json.load(open(f"t-{f}.json"))
+              events = t.get("events", []) if isinstance(t, dict) else t
+              newest = max([newest] + [e.get("date", "") for e in events])
+          print("newest event", newest)
+          if not newest or now.date() - datetime.fromisoformat(newest).date() > timedelta(days=3):
+              problems.append(f"no event newer than {newest or 'never'} in any format (a source may have stalled)")
+          n = json.load(open("news.json"))
+          nage = now - datetime.fromisoformat(n["generated_at"]).replace(tzinfo=timezone.utc)
+          print("news age", nage)
+          if nage > timedelta(days=2):
+              problems.append(f"news is {nage} old")
+          if problems:
+              open("problems.txt", "w").write("\n".join(f"- {p}" for p in problems))
+              sys.exit("; ".join(problems))
+          PY
+      - name: Tell Discord when the check failed
+        if: failure()
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          [ -n "$HOOK" ] || exit 0
+          MSG="Health check failed: $(cat problems.txt 2>/dev/null | head -c 900 || echo 'the site or a data file could not be fetched'). Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true

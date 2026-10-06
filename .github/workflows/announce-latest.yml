@@ -1,0 +1,49 @@
+name: Announce latest
+
+# Posts the newest tournaments (major first, at most 3) to the team's Discord channel once, as ready-to-post items,
+# so the channel starts with real content. Normal announcements only cover tournaments that are new since the last
+# deploy. Run by hand: Actions, Announce latest, Run workflow.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  latest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+          sparse-checkout: apps/web
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          package_json_file: apps/web/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - name: Get the data of the latest successful deploy
+        run: |
+          run=$(gh run list --workflow ci.yml --branch main --status success --limit 10 --json databaseId,conclusion -q '.[0].databaseId')
+          gh run download "$run" --name api --dir api-data
+          ls api-data | head
+      - name: Pretend nothing was announced yet
+        run: |
+          mkdir -p prev-indexes
+          for dir in api-data/v1/tournaments/*/; do echo '{"events":[{"id":"seed"}]}' > "prev-indexes/$(basename "$dir").json"; done
+      - run: pnpm install --frozen-lockfile
+        working-directory: apps/web
+      - name: Post
+        working-directory: apps/web
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: pnpm announce --data "$GITHUB_WORKSPACE/api-data/v1" --previous "$GITHUB_WORKSPACE/prev-indexes"

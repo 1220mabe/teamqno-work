@@ -1,0 +1,468 @@
+name: CI
+
+# This file lives in the public runner repo; the code it builds is checked out from the private source repo with a deploy
+# key. Only the owner can start it: a schedule or a manual run, never a pull request, an issue or another workflow, so
+# nobody else can reach a secret. Source of truth: runner/ in the private repo (scripts/publish-runner.sh copies it).
+on:
+  schedule:
+    - cron: "20 */4 * * *" # the runner repo is public, so minutes are free: refresh every 4 hours
+  workflow_dispatch:
+    inputs:
+      post:
+        description: "Also announce and post new tournaments (a scheduled run always does)"
+        type: boolean
+        default: true
+
+permissions: {}
+
+# One run at a time: a deploy must not overlap another, and a scheduled run waits for a manual one.
+concurrency:
+  group: ci
+  cancel-in-progress: false
+
+jobs:
+  # Which commit this run is about (the newest of the source repo's main) and whether its tests already passed.
+  ref:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.out.outputs.sha }}
+      tested: ${{ steps.out.outputs.tested }}
+      discord: ${{ steps.flags.outputs.discord }}
+      x: ${{ steps.flags.outputs.x }}
+      social: ${{ steps.flags.outputs.social }}
+    steps:
+      - name: Which posting secrets are set
+        id: flags
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          X_API_KEY: ${{ secrets.X_API_KEY }}
+          X_API_SECRET: ${{ secrets.X_API_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_SECRET: ${{ secrets.X_ACCESS_SECRET }}
+          BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
+          BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
+          MASTODON_INSTANCE: ${{ secrets.MASTODON_INSTANCE }}
+          MASTODON_TOKEN: ${{ secrets.MASTODON_TOKEN }}
+        run: |
+          [ -n "$DISCORD_WEBHOOK_URL" ] && echo "discord=true" >> "$GITHUB_OUTPUT" || true
+          [ -n "$X_API_KEY" ] && [ -n "$X_API_SECRET" ] && [ -n "$X_ACCESS_TOKEN" ] && [ -n "$X_ACCESS_SECRET" ] && echo "x=true" >> "$GITHUB_OUTPUT" || true
+          { [ -n "$BSKY_HANDLE" ] && [ -n "$BSKY_APP_PASSWORD" ]; } || { [ -n "$MASTODON_INSTANCE" ] && [ -n "$MASTODON_TOKEN" ]; } && echo "social=true" >> "$GITHUB_OUTPUT" || true
+      - name: Newest commit of the source repo
+        id: pick
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          ref: main
+          sparse-checkout: Makefile
+          persist-credentials: false
+      - id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      # A commit is tested once: the cache key is saved by the `mark` job after every test passed. Later runs of the same
+      # commit only refresh the data and deploy.
+      - id: tested
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .tested
+          key: tested-${{ steps.sha.outputs.sha }}
+          lookup-only: true
+      - id: out
+        env:
+          SHA: ${{ steps.sha.outputs.sha }}
+          HIT: ${{ steps.tested.outputs.cache-hit }}
+        run: |
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          [ "$HIT" = "true" ] && echo "tested=true" >> "$GITHUB_OUTPUT" || echo "tested=false" >> "$GITHUB_OUTPUT"
+          echo "commit $SHA tested=$HIT"
+  # Fast checks, in parallel with the browser tests below.
+  web-unit:
+    needs: [ref]
+    if: ${{ needs.ref.outputs.tested != 'true' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+          ref: ${{ needs.ref.outputs.sha }}
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          package_json_file: apps/web/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm lint
+      - run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm test
+
+  # The optional accounts Worker (apps/sync): typecheck and tests against a real SQL engine, no Cloudflare needed.
+  sync-unit:
+    needs: [ref]
+    if: ${{ needs.ref.outputs.tested != 'true' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/sync
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+          ref: ${{ needs.ref.outputs.sha }}
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          package_json_file: apps/sync/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/sync/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm typecheck
+      - run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm test
+
+  # Passkey sign-in in real Chrome (virtual authenticator) against the Worker code on in-memory SQL.
+  sync-e2e:
+    needs: [ref]
+    if: ${{ needs.ref.outputs.tested != 'true' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+          ref: ${{ needs.ref.outputs.sha }}
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          package_json_file: apps/web/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec playwright test -c playwright.sync.config.ts
+
+  # Build the static site once: the browser tests and the deploy both use this exact output.
+  site:
+    needs: [ref]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+          ref: ${{ needs.ref.outputs.sha }}
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          package_json_file: apps/web/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: apps/web/.next/cache
+          key: next-${{ hashFiles('apps/web/pnpm-lock.yaml') }}-${{ hashFiles('apps/web/src/**') }}
+          restore-keys: next-${{ hashFiles('apps/web/pnpm-lock.yaml') }}-
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+        env:
+          # The optional account feature (docs/ACCOUNTS.md): set the repository variable SYNC_ENABLED to 1 only after the Worker is deployed.
+          NEXT_PUBLIC_SYNC_ENABLED: ${{ vars.SYNC_ENABLED }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: site
+          path: apps/web/out
+          retention-days: 1
+          compression-level: 1
+
+  # Check every page in a real browser against fixed test data. The runner already has Chrome.
+  web-e2e:
+    needs: [ref, site]
+    if: ${{ needs.ref.outputs.tested != 'true' }}
+    runs-on: ubuntu-latest
+    # Every spec still runs; two runners each take half (the longest job on the critical path).
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/2", "2/2"]
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+          ref: ${{ needs.ref.outputs.sha }}
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          package_json_file: apps/web/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: site
+          path: apps/web/out
+      - run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm e2e --shard=${{ matrix.shard }}
+
+  pipeline:
+    needs: [ref]
+    if: ${{ needs.ref.outputs.tested != 'true' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pipeline
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+          ref: ${{ needs.ref.outputs.sha }}
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: pipeline/uv.lock
+      - run: uv sync --locked
+      - run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" uv run ruff check .
+      - run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" uv run pytest -q
+
+  # The data files, built in parallel with the tests (they do not depend on each other).
+  data:
+    needs: [ref]
+    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+          ref: ${{ needs.ref.outputs.sha }}
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: pipeline/uv.lock
+      - id: day
+        run: echo "d=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      # Scryfall's bulk file, the MTGO checkout and the TopDeck.gg answers are kept per day, so
+      # several deploys in one day reuse them (and a failing source falls back to the last answer).
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: pipeline/data
+          key: pipeline-data-${{ steps.day.outputs.d }}
+          restore-keys: pipeline-data-
+      - name: Build the static API (cards from Scryfall, tournaments from MTGO, TopDeck.gg and Spicerack)
+        working-directory: pipeline
+        env:
+          TOPDECK_API_KEY: ${{ secrets.TOPDECK_API_KEY }}
+          SPICERACK_API_KEY: ${{ secrets.SPICERACK_API_KEY }}
+        run: |
+          uv sync --locked
+          # What is live now: the banned lists (a ban is a difference from them) and the Journal reports (a ban report
+          # cannot be rebuilt from the data, so it is carried over). A failed fetch removes the file: no ban news, nothing lost.
+          mkdir -p data ../apps/web/public/api/v1/news
+          curl -fsS --max-time 20 --retry 2 "https://teamqno.work/api/v1/legality.json" -o data/legality-before.json || rm -f data/legality-before.json
+          for f in standard modern pioneer legacy vintage pauper; do
+            curl -fsS --max-time 20 --retry 2 "https://teamqno.work/api/v1/news/$f.json" -o "../apps/web/public/api/v1/news/$f.json" || rm -f "../apps/web/public/api/v1/news/$f.json"
+          done
+          uv run python -m sideboard_sage_pipeline cards
+          uv run python -m sideboard_sage_pipeline api
+          uv run python -m sideboard_sage_pipeline metagame
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: api
+          path: apps/web/public/api
+          retention-days: 1
+          compression-level: 6
+
+  # Deploys only after the checks pass, and only from main: the tested site plus the fresh data.
+  # Turn on by setting the repo variable DEPLOY_ENABLED=true and adding the
+  # secrets CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID. See docs/DEPLOY.md.
+  deploy:
+    # One deploy at a time, in order: two overlapping deploys could ship out of order and post twice.
+    concurrency:
+      group: deploy-main
+      cancel-in-progress: false
+    needs: [ref, web-unit, sync-unit, sync-e2e, site, web-e2e, pipeline, data, mark]
+    # A commit that was already tested skips the test jobs (they count as skipped, not failed).
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && vars.DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Posting secrets are not in the job env: install, build and the Cloudflare deploy never see them. Only the
+    # steps that post get them, and the `flags` step (in the `ref` job) tells them which ones are set.
+    env:
+      X_POSTING: ${{ vars.X_POSTING }}
+      SOCIAL_POSTING: ${{ vars.SOCIAL_POSTING }}
+      X_MONTHLY_CAP: ${{ vars.X_MONTHLY_CAP }}
+      X_DAILY_CAP: ${{ vars.X_DAILY_CAP }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: site
+          path: out
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: api
+          path: out/api
+      # Pages for every format, archetype and recent tournament, with their share images (docs/DEPLOY.md).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+          ref: ${{ needs.ref.outputs.sha }}
+          path: repo
+          sparse-checkout: apps/web
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          package_json_file: repo/apps/web/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: repo/apps/web/pnpm-lock.yaml
+      # Each run saves the images it used; unchanged ones are copied, not drawn again.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: og-cache
+          key: og-${{ github.run_id }}
+          restore-keys: og-
+      - name: Write the format, archetype and tournament pages
+        working-directory: repo/apps/web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm seo --site "$GITHUB_WORKSPACE/out" --cache "$GITHUB_WORKSPACE/og-cache" --budget 120
+      # What is live right now, saved before the deploy so the announcement step can tell which tournaments are new.
+      # A format whose index cannot be fetched is skipped: announce nothing rather than flood the channel.
+      - name: Save the live tournament indexes
+        if: ${{ github.event_name == 'schedule' || inputs.post }}
+        continue-on-error: true
+        run: |
+          mkdir -p prev-indexes
+          for dir in out/api/v1/tournaments/*/; do
+            f=$(basename "$dir")
+            curl -fsS --max-time 15 --retry 2 "https://teamqno.work/api/v1/tournaments/$f/index.json" -o "prev-indexes/$f.json" || rm -f "prev-indexes/$f.json"
+          done
+          # The Journal reports that were live: the ones not in it are new (a missing file announces no report).
+          curl -fsS --max-time 15 --retry 2 "https://teamqno.work/api/v1/news/index.json" -o prev-indexes/news-index.json || rm -f prev-indexes/news-index.json
+      - uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy out --project-name=sideboard-sage --branch=main
+      # New tournaments go to the team's Discord channel as ready-to-post items (docs/OPERATIONS.md). Never blocks a deploy.
+      - name: Announce new tournaments
+        if: ${{ (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.discord == 'true' }}
+        continue-on-error: true
+        working-directory: repo/apps/web
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: pnpm announce --data "$GITHUB_WORKSPACE/out/api/v1" --previous "$GITHUB_WORKSPACE/prev-indexes"
+      # Optional automatic posting to X (docs/OPERATIONS.md, "X posting"). Does nothing without all four secrets or
+      # when the variable X_POSTING is "off". The ledger (posted ids and the monthly counter) lives in the Actions cache.
+      - name: Restore X ledger
+        if: ${{ (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.x == 'true' && env.X_POSTING != 'off' }}
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: x-ledger
+          key: x-ledger-${{ github.run_id }}
+          restore-keys: x-ledger-
+      - name: Post to X
+        if: ${{ (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.x == 'true' && env.X_POSTING != 'off' }}
+        continue-on-error: true
+        working-directory: repo/apps/web
+        env:
+          X_API_KEY: ${{ secrets.X_API_KEY }}
+          X_API_SECRET: ${{ secrets.X_API_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_SECRET: ${{ secrets.X_ACCESS_SECRET }}
+        run: pnpm x-post --data "$GITHUB_WORKSPACE/out/api/v1" --previous "$GITHUB_WORKSPACE/prev-indexes" --ledger "$GITHUB_WORKSPACE/x-ledger/ledger.json"
+      - name: Save X ledger
+        if: ${{ always() && hashFiles('x-ledger/ledger.json') != '' }}
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: x-ledger
+          key: x-ledger-${{ github.run_id }}
+      # Optional free posting to Bluesky and Mastodon (docs/OPERATIONS.md). Each network needs its own secrets; the
+      # variable SOCIAL_POSTING set to "off" stops both. Its own ledger keeps one post per item per network.
+      - name: Restore social ledger
+        if: ${{ (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.social == 'true' && env.SOCIAL_POSTING != 'off' }}
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: social-ledger
+          key: social-ledger-${{ github.run_id }}
+          restore-keys: social-ledger-
+      - name: Post to Bluesky and Mastodon
+        if: ${{ (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.social == 'true' && env.SOCIAL_POSTING != 'off' }}
+        continue-on-error: true
+        working-directory: repo/apps/web
+        env:
+          BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
+          BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
+          MASTODON_INSTANCE: ${{ secrets.MASTODON_INSTANCE }}
+          MASTODON_TOKEN: ${{ secrets.MASTODON_TOKEN }}
+        run: pnpm social-post --data "$GITHUB_WORKSPACE/out/api/v1" --previous "$GITHUB_WORKSPACE/prev-indexes" --ledger "$GITHUB_WORKSPACE/social-ledger/ledger.json"
+      - name: Save social ledger
+        if: ${{ always() && hashFiles('social-ledger/ledger.json') != '' }}
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: social-ledger
+          key: social-ledger-${{ github.run_id }}
+
+  # Remembers that every test passed for this commit, so the next runs skip them.
+  mark:
+    needs: [ref, web-unit, sync-unit, sync-e2e, web-e2e, pipeline]
+    if: ${{ needs.ref.outputs.tested != 'true' && !cancelled() && !contains(needs.*.result, 'failure') }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: mkdir .tested && echo ok > .tested/ok
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .tested
+          key: tested-${{ needs.ref.outputs.sha }}
+
+  # A failed run must not go unnoticed: a Discord message with the run link (a public Issue would show the failure to
+  # everyone). GitHub also emails the owner about a failed scheduled run.
+  alert:
+    needs: [ref, data, site, deploy, mark]
+    if: ${{ failure() && needs.ref.outputs.discord == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          MSG="Refresh or deploy failed, the site keeps the last good data: $RUN"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true

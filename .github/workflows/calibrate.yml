@@ -1,0 +1,79 @@
+name: Calibrate
+
+# Weekly: archive closed months of events into history/ (no player names), and re-test
+# whether the sideboard signal predicts matches on unseen events over about a year of
+# MTGO and paper results, and re-test the "How to beat this deck" rankings on held-out events
+# (promote a better method or keep the deployed one). It commits small files (data/calibration.json,
+# data/models/answers.json, data/answers_scoreboard.json, new history shards); the daily build only reads them, so this heavier job can never block a deploy.
+# See docs/DEPLOY.md and docs/ALGORITHM.md section 7.
+on:
+  schedule:
+    - cron: "20 3 * * 1"
+  workflow_dispatch:
+
+permissions: {} # the checkout and the push use the deploy key; nothing here needs the workflow token
+
+jobs:
+  calibrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      - name: Archive closed months, then re-run the calibration
+        working-directory: pipeline
+        env:
+          TOPDECK_API_KEY: ${{ secrets.TOPDECK_API_KEY }}
+        run: |
+          uv sync --locked
+          uv run python -m sideboard_sage_pipeline cards
+          # Closed months are written once (no player names, checksummed). Skipped for a format when
+          # TopDeck.gg does not answer, so an incomplete month is never frozen.
+          uv run python -m sideboard_sage_pipeline archive
+          # Keep archetype rules current for new sets and rotation: names stay, signatures update, new decks are added.
+          uv run python -m sideboard_sage_pipeline refresh-rules
+          uv run python -m sideboard_sage_pipeline calibrate
+      - name: Re-test the answer rankings; promote a better method or keep the deployed one
+        working-directory: pipeline
+        # A failure here never changes what the site shows: the model file is only rewritten on a promotion.
+        continue-on-error: true
+        env:
+          TOPDECK_API_KEY: ${{ secrets.TOPDECK_API_KEY }}
+        run: uv run python -m sideboard_sage_pipeline answers
+      - name: Warn if the history folder grows large
+        run: |
+          size=$(du -sm history | cut -f1)
+          echo "history is ${size} MB"
+          [ "$size" -lt 150 ] || echo "::warning::history is over 150 MB; review how much to keep"
+      - name: Commit new history and the calibration when they changed
+        env:
+          SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
+        run: |
+          git config user.name "calibration-bot"
+          git config user.email "calibration-bot@users.noreply.github.com"
+          git add -A history data/calibration.json data/archetypes $(ls -d data/models data/answers_scoreboard.json data/names_coverage.json 2>/dev/null)
+          if ! git diff --cached --quiet; then
+            git commit -m "data: weekly history, archetype rules, calibration and answer scoreboard"
+            # The read key used for the checkout cannot push. The write key exists only in this step, after every
+            # dependency install has run, and is deleted at the end.
+            umask 077
+            printf '%s\n' "$SOURCE_WRITE_KEY" > "$RUNNER_TEMP/wkey"
+            GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/wkey -o StrictHostKeyChecking=accept-new" git push git@github.com:1220mabe/sideboard-sage.git HEAD:main
+            rm -f "$RUNNER_TEMP/wkey"
+          fi
+      - name: Ask for a names review when community names cover too few decks
+        # Fails soft: a new set often brings decks the dictionary does not know yet (docs/ALGORITHM.md section 2).
+        continue-on-error: true
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          low=$(jq -r '.formats | to_entries[] | select(.value.below_floor) | "\(.key) \(.value.community * 100 | floor)% (floor \(.value.floor * 100 | floor)%)"' data/names_coverage.json | paste -sd, -)
+          [ -n "$low" ] || exit 0
+          echo "::warning::community archetype names cover too few decks: $low"
+          [ -n "$HOOK" ] || exit 0
+          MSG="Archetype names need review after the weekly refresh: $low. See data/archetypes/<format>.draft.yaml in the source repo."
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true

@@ -1,0 +1,41 @@
+name: Coverage audit
+
+# Every 6 hours (seconds of runtime): events per format and source in the last 14 days, hours from the event day to its
+# appearance on the live site, and big events (data/big_events.yaml) with no data. The result is the run summary (#79).
+# The first-seen ledger lives in the Actions cache, so no secret and no commit is needed.
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: pipeline/uv.lock
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: pipeline/data/coverage-ledger.json
+          key: coverage-ledger-${{ github.run_id }}
+          restore-keys: coverage-ledger-
+      - name: Audit
+        working-directory: pipeline
+        run: |
+          uv sync --locked
+          uv run python -m sideboard_sage_pipeline coverage-audit | tee "$GITHUB_STEP_SUMMARY"
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: pipeline/data/coverage-ledger.json
+          key: coverage-ledger-${{ github.run_id }}
