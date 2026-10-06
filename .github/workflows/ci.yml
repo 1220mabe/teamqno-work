@@ -297,6 +297,8 @@ jobs:
             curl -fsS --max-time 20 --retry 2 "https://sideboard-sage.pages.dev/api/v1/news/$f.json" -o "../apps/web/public/api/v1/news/$f.json" || rm -f "../apps/web/public/api/v1/news/$f.json"
           done
           uv run python -m sideboard_sage_pipeline cards
+          # Card names per language: one search each, cached in pipeline/data for a week; a failure keeps the cached copy.
+          uv run python -m sideboard_sage_pipeline names
           uv run python -m sideboard_sage_pipeline api
           uv run python -m sideboard_sage_pipeline metagame
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
