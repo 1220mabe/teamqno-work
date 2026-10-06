@@ -36,6 +36,7 @@ jobs:
       tested: ${{ steps.out.outputs.tested }}
       discord: ${{ steps.flags.outputs.discord }}
       x: ${{ steps.flags.outputs.x }}
+      buffer: ${{ steps.flags.outputs.buffer }}
       social: ${{ steps.flags.outputs.social }}
     steps:
       - name: Which posting secrets are set
@@ -46,6 +47,8 @@ jobs:
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_SECRET: ${{ secrets.X_ACCESS_SECRET }}
+          BUFFER_TOKEN: ${{ secrets.BUFFER_TOKEN }}
+          BUFFER_CHANNEL_ID: ${{ secrets.BUFFER_CHANNEL_ID }}
           BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
           BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
           MASTODON_INSTANCE: ${{ secrets.MASTODON_INSTANCE }}
@@ -53,6 +56,7 @@ jobs:
         run: |
           [ -n "$DISCORD_WEBHOOK_URL" ] && echo "discord=true" >> "$GITHUB_OUTPUT" || true
           [ -n "$X_API_KEY" ] && [ -n "$X_API_SECRET" ] && [ -n "$X_ACCESS_TOKEN" ] && [ -n "$X_ACCESS_SECRET" ] && echo "x=true" >> "$GITHUB_OUTPUT" || true
+          [ -n "$BUFFER_TOKEN" ] && [ -n "$BUFFER_CHANNEL_ID" ] && echo "buffer=true" >> "$GITHUB_OUTPUT" || true
           { [ -n "$BSKY_HANDLE" ] && [ -n "$BSKY_APP_PASSWORD" ]; } || { [ -n "$MASTODON_INSTANCE" ] && [ -n "$MASTODON_TOKEN" ]; } && echo "social=true" >> "$GITHUB_OUTPUT" || true
       - name: Newest commit of the source repo
         id: pick
@@ -329,6 +333,10 @@ jobs:
       SOCIAL_POSTING: ${{ vars.SOCIAL_POSTING }}
       X_MONTHLY_CAP: ${{ vars.X_MONTHLY_CAP }}
       X_DAILY_CAP: ${{ vars.X_DAILY_CAP }}
+      BUFFER_POSTING: ${{ vars.BUFFER_POSTING }}
+      BUFFER_DAILY_CAP: ${{ vars.BUFFER_DAILY_CAP }}
+      BUFFER_MONTHLY_CAP: ${{ vars.BUFFER_MONTHLY_CAP }}
+      BUFFER_LEAGUE_RESERVE: ${{ vars.BUFFER_LEAGUE_RESERVE }}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -429,6 +437,33 @@ jobs:
         with:
           path: x-ledger
           key: x-ledger-${{ github.run_id }}
+      # Optional free posting to X through Buffer's free plan (docs/OPERATIONS.md, "Buffer posting"). Does nothing
+      # without both secrets or when the variable BUFFER_POSTING is "off". Own ledger in the Actions cache; fail closed
+      # like the X ledger: without a restored ledger nothing is posted unless X_LEDGER_INIT is "true" (first run only).
+      - name: Restore Buffer ledger
+        id: bufledger
+        if: ${{ (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.buffer == 'true' && env.BUFFER_POSTING != 'off' }}
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: buffer-ledger
+          key: buffer-ledger-${{ github.run_id }}
+          restore-keys: buffer-ledger-
+      - name: Post to X through Buffer
+        if: ${{ (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.buffer == 'true' && env.BUFFER_POSTING != 'off' && (steps.bufledger.outputs.cache-matched-key != '' || vars.X_LEDGER_INIT == 'true') }}
+        continue-on-error: true
+        working-directory: repo/apps/web
+        env:
+          BUFFER_TOKEN: ${{ secrets.BUFFER_TOKEN }}
+          BUFFER_CHANNEL_ID: ${{ secrets.BUFFER_CHANNEL_ID }}
+        run: pnpm buffer-post --data "$GITHUB_WORKSPACE/out/api/v1" --previous "$GITHUB_WORKSPACE/prev-indexes" --ledger "$GITHUB_WORKSPACE/buffer-ledger/ledger.json"
+      - name: Save Buffer ledger
+        if: ${{ always() && hashFiles('buffer-ledger/ledger.json') != '' }}
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: buffer-ledger
+          key: buffer-ledger-${{ github.run_id }}
       # Optional free posting to Bluesky and Mastodon (docs/OPERATIONS.md). Each network needs its own secrets; the
       # variable SOCIAL_POSTING set to "off" stops both. Its own ledger keeps one post per item per network.
       - name: Restore social ledger
