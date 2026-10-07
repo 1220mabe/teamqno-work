@@ -21,7 +21,7 @@ permissions: {} # the checkout and the push use the deploy key; nothing here nee
 jobs:
   calibrate:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60 # the answer re-test (three protocols, tuned forward methods) takes about 25 minutes on a laptop
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
