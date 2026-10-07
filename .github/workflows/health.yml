@@ -49,6 +49,9 @@ jobs:
               t = json.load(open(f"t-{f}.json"))
               events = t.get("events", []) if isinstance(t, dict) else t
               newest = max([newest] + [e.get("date", "") for e in events])
+              # Holes the pipeline found ("gaps": [date, type] pairs): a warning only, the list shows the same note.
+              for day, kind in (t.get("gaps", []) if isinstance(t, dict) else []):
+                  print(f"::warning::{f} {kind}: no MTGO record for {day} (it usually runs that weekday; the source may have missed it)")
           print("newest event", newest)
           if not newest or now.date() - datetime.fromisoformat(newest).date() > timedelta(days=3):
               problems.append(f"no event newer than {newest or 'never'} in any format (a source may have stalled)")
