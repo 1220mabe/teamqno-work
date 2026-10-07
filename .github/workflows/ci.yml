@@ -53,11 +53,13 @@ jobs:
           BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
           MASTODON_INSTANCE: ${{ secrets.MASTODON_INSTANCE }}
           MASTODON_TOKEN: ${{ secrets.MASTODON_TOKEN }}
+          THREADS_TOKEN: ${{ secrets.THREADS_TOKEN }}
+          INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
         run: |
           [ -n "$DISCORD_WEBHOOK_URL" ] && echo "discord=true" >> "$GITHUB_OUTPUT" || true
           [ -n "$X_API_KEY" ] && [ -n "$X_API_SECRET" ] && [ -n "$X_ACCESS_TOKEN" ] && [ -n "$X_ACCESS_SECRET" ] && echo "x=true" >> "$GITHUB_OUTPUT" || true
           [ -n "$BUFFER_TOKEN" ] && [ -n "$BUFFER_CHANNEL_ID" ] && echo "buffer=true" >> "$GITHUB_OUTPUT" || true
-          { [ -n "$BSKY_HANDLE" ] && [ -n "$BSKY_APP_PASSWORD" ]; } || { [ -n "$MASTODON_INSTANCE" ] && [ -n "$MASTODON_TOKEN" ]; } && echo "social=true" >> "$GITHUB_OUTPUT" || true
+          { [ -n "$BSKY_HANDLE" ] && [ -n "$BSKY_APP_PASSWORD" ]; } || { [ -n "$MASTODON_INSTANCE" ] && [ -n "$MASTODON_TOKEN" ]; } || [ -n "$THREADS_TOKEN" ] || [ -n "$INSTAGRAM_TOKEN" ] && echo "social=true" >> "$GITHUB_OUTPUT" || true
       - name: Newest commit of the source repo
         id: pick
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -474,7 +476,7 @@ jobs:
           path: social-ledger
           key: social-ledger-${{ github.run_id }}
           restore-keys: social-ledger-
-      - name: Post to Bluesky and Mastodon
+      - name: Post to Bluesky, Mastodon, Threads and Instagram
         if: ${{ (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.social == 'true' && env.SOCIAL_POSTING != 'off' }}
         continue-on-error: true
         working-directory: repo/apps/web
@@ -483,6 +485,10 @@ jobs:
           BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
           MASTODON_INSTANCE: ${{ secrets.MASTODON_INSTANCE }}
           MASTODON_TOKEN: ${{ secrets.MASTODON_TOKEN }}
+          THREADS_TOKEN: ${{ secrets.THREADS_TOKEN }}
+          INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
+          THREADS_DAILY_CAP: ${{ vars.THREADS_DAILY_CAP }}
+          INSTAGRAM_DAILY_CAP: ${{ vars.INSTAGRAM_DAILY_CAP }}
         run: pnpm social-post --data "$GITHUB_WORKSPACE/out/api/v1" --previous "$GITHUB_WORKSPACE/prev-indexes" --ledger "$GITHUB_WORKSPACE/social-ledger/ledger.json"
       - name: Save social ledger
         if: ${{ always() && hashFiles('social-ledger/ledger.json') != '' }}
