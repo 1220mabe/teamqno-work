@@ -52,6 +52,25 @@ jobs:
           print("newest event", newest)
           if not newest or now.date() - datetime.fromisoformat(newest).date() > timedelta(days=3):
               problems.append(f"no event newer than {newest or 'never'} in any format (a source may have stalled)")
+          # Per format and event type (status.json "latest_events"): a stale Challenge fails, a stale League only warns.
+          today = now.date()
+          for f in ["standard", "modern", "pioneer", "legacy", "vintage", "pauper"]:
+              latest = s.get("latest_events", {}).get(f, {})
+              for kind, limit, fails in (("challenge", 3, True), ("league", 2, False)):
+                  day = latest.get(kind)
+                  if day is None and kind == "league":
+                      continue  # not every format runs Leagues
+                  late = day is None or (today - datetime.fromisoformat(day).date()).days > limit
+                  if not late:
+                      continue
+                  missing = "any day in the window" if day is None else (datetime.fromisoformat(day) + timedelta(days=1)).date().isoformat()
+                  line = f"{f} {kind}: newest {day or 'none'}, missing {missing} (limit {limit} days)"
+                  if fails:
+                      problems.append(line)
+                  else:
+                      print(f"::warning::{line}")
+          for src in s.get("stale_sources", []):
+              print(f"::warning::saved answer of {src} is older than the limit (stale-if-error); the source may be down")
           n = json.load(open("news.json"))
           nage = now - datetime.fromisoformat(n["generated_at"]).replace(tzinfo=timezone.utc)
           print("news age", nage)
