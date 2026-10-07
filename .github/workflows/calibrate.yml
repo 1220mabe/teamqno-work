@@ -10,6 +10,11 @@ on:
   schedule:
     - cron: "20 3 * * 1"
   workflow_dispatch:
+    inputs:
+      months:
+        description: "Months of history to archive (leave empty for the default; 25 backfills older months once)"
+        required: false
+        default: ""
 
 permissions: {} # the checkout and the push use the deploy key; nothing here needs the workflow token
 
@@ -28,12 +33,13 @@ jobs:
         working-directory: pipeline
         env:
           TOPDECK_API_KEY: ${{ secrets.TOPDECK_API_KEY }}
+          MONTHS: ${{ github.event.inputs.months }}
         run: |
           uv sync --locked
           uv run python -m sideboard_sage_pipeline cards
           # Closed months are written once (no player names, checksummed). Skipped for a format when
           # TopDeck.gg does not answer, so an incomplete month is never frozen.
-          uv run python -m sideboard_sage_pipeline archive
+          uv run python -m sideboard_sage_pipeline archive ${MONTHS:+--months "$MONTHS"}
           # Keep archetype rules current for new sets and rotation: names stay, signatures update, new decks are added.
           uv run python -m sideboard_sage_pipeline refresh-rules
           uv run python -m sideboard_sage_pipeline calibrate
