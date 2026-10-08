@@ -418,14 +418,6 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy out --project-name=sideboard-sage --branch=main
-      # New tournaments go to the team's Discord channel as ready-to-post items (docs/OPERATIONS.md). Never blocks a deploy.
-      - name: Announce new tournaments
-        if: ${{ (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.discord == 'true' }}
-        continue-on-error: true
-        working-directory: repo/apps/web
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: pnpm announce --data "$GITHUB_WORKSPACE/out/api/v1" --previous "$GITHUB_WORKSPACE/prev-indexes"
       # Optional automatic posting to X (docs/OPERATIONS.md, "X posting"). Does nothing without all four secrets or
       # when the variable X_POSTING is "off". The ledger (posted ids and the monthly counter) lives in the Actions cache.
       - name: Restore X ledger
@@ -461,21 +453,34 @@ jobs:
       # like the X ledger: without a restored ledger nothing is posted unless X_LEDGER_INIT is "true" (first run only).
       - name: Restore Buffer ledger
         id: bufledger
-        if: ${{ (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.buffer == 'true' && env.BUFFER_POSTING != 'off' }}
+        if: ${{ (github.event_name == 'schedule' || inputs.post) && (needs.ref.outputs.buffer == 'true' && env.BUFFER_POSTING != 'off' || needs.ref.outputs.discord == 'true') }}
         continue-on-error: true
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: buffer-ledger
           key: buffer-ledger-${{ github.run_id }}
           restore-keys: buffer-ledger-
-      - name: Post to X through Buffer
-        if: ${{ (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.buffer == 'true' && env.BUFFER_POSTING != 'off' && (steps.bufledger.outputs.cache-matched-key != '' || vars.X_LEDGER_INIT == 'true') }}
+      # The one dispatch path (docs/OPERATIONS.md, "One dispatch path"): every item goes to Buffer and to Discord from here, one
+      # ledger entry per item and channel, a failed channel is retried on later runs, and Discord says when Buffer did not post.
+      - name: Post to X through Buffer and to Discord
+        id: dispatch
+        if: ${{ (github.event_name == 'schedule' || inputs.post) && (needs.ref.outputs.buffer == 'true' && env.BUFFER_POSTING != 'off' || needs.ref.outputs.discord == 'true') && (steps.bufledger.outputs.cache-matched-key != '' || vars.X_LEDGER_INIT == 'true') }}
         continue-on-error: true
         working-directory: repo/apps/web
         env:
           BUFFER_TOKEN: ${{ secrets.BUFFER_TOKEN }}
           BUFFER_CHANNEL_ID: ${{ secrets.BUFFER_CHANNEL_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: pnpm buffer-post --data "$GITHUB_WORKSPACE/out/api/v1" --previous "$GITHUB_WORKSPACE/prev-indexes" --ledger "$GITHUB_WORKSPACE/buffer-ledger/ledger.json"
+      # Discord-only fallback (docs/OPERATIONS.md, "One dispatch path"): when the Buffer/Discord dispatch above did not run (no Buffer
+      # secrets, Buffer off, or its ledger missing), new tournaments still go to the team's Discord channel. Never blocks a deploy.
+      - name: Announce new tournaments
+        if: ${{ (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.discord == 'true' && steps.dispatch.outcome != 'success' }}
+        continue-on-error: true
+        working-directory: repo/apps/web
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: pnpm announce --data "$GITHUB_WORKSPACE/out/api/v1" --previous "$GITHUB_WORKSPACE/prev-indexes"
       - name: Save Buffer ledger
         if: ${{ always() && hashFiles('buffer-ledger/ledger.json') != '' }}
         continue-on-error: true

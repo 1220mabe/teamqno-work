@@ -120,6 +120,7 @@ jobs:
           NEWSPICK_DAILY_CAP: ${{ vars.NEWSPICK_DAILY_CAP }}
           BUFFER_TOKEN: ${{ secrets.BUFFER_TOKEN }}
           BUFFER_CHANNEL_ID: ${{ secrets.BUFFER_CHANNEL_ID }}
+          BUFFER_POSTING: ${{ vars.BUFFER_POSTING }}
           BUFFER_DAILY_CAP: ${{ vars.BUFFER_DAILY_CAP }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
@@ -133,6 +134,7 @@ jobs:
           NEWSPICK_POSTING: ${{ vars.NEWSPICK_POSTING }}
           BUFFER_TOKEN: ${{ secrets.BUFFER_TOKEN }}
           BUFFER_CHANNEL_ID: ${{ secrets.BUFFER_CHANNEL_ID }}
+          BUFFER_POSTING: ${{ vars.BUFFER_POSTING }}
           BUFFER_DAILY_CAP: ${{ vars.BUFFER_DAILY_CAP }}
           BUFFER_MONTHLY_CAP: ${{ vars.BUFFER_MONTHLY_CAP }}
           NEWSPICK_DAILY_CAP: ${{ vars.NEWSPICK_DAILY_CAP }}
