@@ -1,0 +1,143 @@
+name: News picks
+
+# Daily: one news-pick post (a new or imminent set from Scryfall's sets API) in English and Japanese, with our page
+# first, then the source and credit. The take is drafted by Workers AI under a daily neuron cap, or by a fixed template.
+# Weekly (Mondays): a bake-off picks the draft model. Both commit small files under data/ai/ (a failed commit fails the job and alerts Discord; posts are claimed in a commit before they are sent, so a lost push can never cause a re-post) and are separate from the
+# deploy: a failure here never touches the site. See docs/OPERATIONS.md, "News picks".
+on:
+  schedule:
+    - cron: "40 7 * * *"
+    - cron: "50 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      bakeoff:
+        description: "Run the model bake-off instead of the daily pick"
+        type: boolean
+        default: false
+
+permissions: {} # the checkout and the push use the deploy keys; only the download step gets a token (below)
+
+concurrency:
+  group: news-picks
+  cancel-in-progress: false
+
+jobs:
+  pick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read # download the data of the latest deploy
+    env:
+      BAKEOFF: ${{ github.event.inputs.bakeoff == 'true' || github.event.schedule == '50 3 * * 1' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          ref: main
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          package_json_file: apps/web/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm install --frozen-lockfile
+        working-directory: apps/web
+      - name: Unit tests of the drafting code (a broken change must not post)
+        working-directory: apps/web
+        run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec vitest run src/lib/workersai.test.ts scripts/news-pick.test.ts scripts/news-pick.run.test.ts
+      - name: Get the data of the latest successful deploy
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run=$(gh run list --workflow ci.yml --branch main --status success --limit 10 --json databaseId -q '.[0].databaseId')
+          gh run download "$run" --name api --dir api-data
+      - name: Helper that commits data/ai, retrying on a moved main, and fails loudly
+        env:
+          SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          cat > "$RUNNER_TEMP/persist.sh" <<'SH'
+          #!/usr/bin/env bash
+          # usage: persist.sh "<commit message>". Commits data/ai, pushes with the write key; on a rejected push it
+          # fetches the newest main, takes only our data/ai files on top of it and tries again (as calibrate.yml does).
+          set -u
+          MSG="$1"
+          git config user.name "news-bot"
+          git config user.email "news-bot@users.noreply.github.com"
+          git add data/ai
+          git diff --cached --quiet && exit 0
+          umask 077
+          printf '%s\n' "$SOURCE_WRITE_KEY" > "$RUNNER_TEMP/wkey"
+          # GitHub's published ed25519 host key, pinned instead of trusting the first answer.
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$RUNNER_TEMP/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/wkey -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o StrictHostKeyChecking=yes"
+          REMOTE=git@github.com:1220mabe/sideboard-sage.git
+          rm -rf "$RUNNER_TEMP/ai-keep" && cp -r data/ai "$RUNNER_TEMP/ai-keep"
+          git commit -q -m "$MSG"
+          for attempt in 1 2 3 4; do
+            if git push "$REMOTE" HEAD:main; then rm -f "$RUNNER_TEMP/wkey"; exit 0; fi
+            git fetch --depth=1 "$REMOTE" main && git reset -q --hard FETCH_HEAD || true
+            rm -rf data/ai && cp -r "$RUNNER_TEMP/ai-keep" data/ai
+            git add data/ai
+            git diff --cached --quiet || git commit -q -m "$MSG"
+            sleep $((attempt * 5))
+          done
+          rm -f "$RUNNER_TEMP/wkey"
+          echo "::error::could not push data/ai after 4 attempts"
+          [ -z "${DISCORD_WEBHOOK_URL:-}" ] || curl -fsS --max-time 15 -H 'Content-Type: application/json' -d '{"content":"News picks: the ledger commit could not be pushed. Nothing further was posted."}' "$DISCORD_WEBHOOK_URL" || true
+          exit 1
+          SH
+          chmod +x "$RUNNER_TEMP/persist.sh"
+      # The ledger is committed BEFORE anything is sent, so a failed push stops the run with nothing posted, and a later
+      # failure can never cause a second post. Not continue-on-error: a failure fails the job (GitHub emails the owner).
+      - name: Weekly bake-off, then commit the model choice
+        if: ${{ env.BAKEOFF == 'true' }}
+        working-directory: apps/web
+        env:
+          CF_AI_TOKEN: ${{ secrets.CF_AI_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          AI_DRAFTING: ${{ vars.AI_DRAFTING }}
+          AI_NEURON_CAP: ${{ vars.AI_NEURON_CAP }}
+          SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          pnpm news-pick --bakeoff || true
+          cd "$GITHUB_WORKSPACE" && "$RUNNER_TEMP/persist.sh" "data: draft model bake-off"
+      - name: Claim today's picks and commit the claim
+        if: ${{ env.BAKEOFF != 'true' }}
+        working-directory: apps/web
+        env:
+          CF_AI_TOKEN: ${{ secrets.CF_AI_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          AI_DRAFTING: ${{ vars.AI_DRAFTING }}
+          AI_NEURON_CAP: ${{ vars.AI_NEURON_CAP }}
+          NEWSPICK_POSTING: ${{ vars.NEWSPICK_POSTING }}
+          NEWSPICK_DAILY_CAP: ${{ vars.NEWSPICK_DAILY_CAP }}
+          BUFFER_TOKEN: ${{ secrets.BUFFER_TOKEN }}
+          BUFFER_CHANNEL_ID: ${{ secrets.BUFFER_CHANNEL_ID }}
+          BUFFER_DAILY_CAP: ${{ vars.BUFFER_DAILY_CAP }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
+        run: |
+          pnpm news-pick --claim --data "$GITHUB_WORKSPACE/api-data/v1" || true
+          cd "$GITHUB_WORKSPACE" && "$RUNNER_TEMP/persist.sh" "data: news-pick claim"
+      - name: Send the claimed posts, then commit the result
+        if: ${{ env.BAKEOFF != 'true' }}
+        working-directory: apps/web
+        env:
+          NEWSPICK_POSTING: ${{ vars.NEWSPICK_POSTING }}
+          BUFFER_TOKEN: ${{ secrets.BUFFER_TOKEN }}
+          BUFFER_CHANNEL_ID: ${{ secrets.BUFFER_CHANNEL_ID }}
+          BUFFER_DAILY_CAP: ${{ vars.BUFFER_DAILY_CAP }}
+          BUFFER_MONTHLY_CAP: ${{ vars.BUFFER_MONTHLY_CAP }}
+          NEWSPICK_DAILY_CAP: ${{ vars.NEWSPICK_DAILY_CAP }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
+        run: |
+          pnpm news-pick --send || true
+          cd "$GITHUB_WORKSPACE" && "$RUNNER_TEMP/persist.sh" "data: news-pick result"
