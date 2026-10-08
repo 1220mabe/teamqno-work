@@ -307,6 +307,22 @@ jobs:
           uv run python -m sideboard_sage_pipeline names
           uv run python -m sideboard_sage_pipeline api
           uv run python -m sideboard_sage_pipeline metagame
+      # Pre-publish gate (#135), report-only until it has run clean on real data for a while: a failed check alerts Discord but does not
+      # stop the deploy (a false positive must never wedge a deploy). To make it blocking, restore `exit 1` below.
+      # The problems (counts and names only, no source) go to Discord when the webhook is set.
+      - name: Data gate
+        working-directory: pipeline
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if ! uv run python -m sideboard_sage_pipeline gate > gate.txt; then
+            cat gate.txt
+            MSG="Data gate warning (report only, deploy continues): $RUN"$'\n'"$(head -c 1500 gate.txt)"
+            [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
+            exit 0
+          fi
+          cat gate.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: api
