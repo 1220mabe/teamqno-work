@@ -306,6 +306,8 @@ jobs:
           # Card names per language: one search each, cached in pipeline/data for a week; a failure keeps the cached copy.
           uv run python -m sideboard_sage_pipeline names
           uv run python -m sideboard_sage_pipeline api
+          # Card roles for the playtest opponent, read from the local bulk file (no network); only the playtest loads them.
+          uv run python -m sideboard_sage_pipeline roles
           uv run python -m sideboard_sage_pipeline metagame
       # Pre-publish gate (#135), report-only until it has run clean on real data for a while: a failed check alerts Discord but does not
       # stop the deploy (a false positive must never wedge a deploy). To make it blocking, add `[ "$rc" -eq 1 ] && exit 1` after the alert.
