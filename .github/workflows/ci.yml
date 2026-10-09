@@ -290,8 +290,10 @@ jobs:
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: pipeline/data
-          key: pipeline-data-${{ steps.day.outputs.d }}
-          restore-keys: pipeline-data-
+          key: pipeline-data-${{ steps.day.outputs.d }}-${{ github.run_id }}
+          restore-keys: |
+            pipeline-data-${{ steps.day.outputs.d }}-
+            pipeline-data-
       # A UI-only deploy reuses the last built data (cuts about 3 minutes); no cached copy means a normal build.
       - name: Reuse the last built data
         id: api
