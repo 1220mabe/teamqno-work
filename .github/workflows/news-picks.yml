@@ -48,7 +48,7 @@ jobs:
         working-directory: apps/web
       - name: Unit tests of the drafting code (a broken change must not post)
         working-directory: apps/web
-        run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec vitest run src/lib/workersai.test.ts scripts/news-pick.test.ts scripts/news-pick.run.test.ts
+        run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec vitest run src/lib/workersai.test.ts scripts/news-pick.test.ts scripts/news-pick.run.test.ts scripts/news-hot.test.ts
       - name: Get the data of the latest successful deploy
         continue-on-error: true
         env:
