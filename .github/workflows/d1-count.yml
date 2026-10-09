@@ -1,0 +1,45 @@
+name: D1 count
+
+# One number for the owner: how many accounts exist (#175). Runs with the same read token as the backup and prints
+# only the count (no emails, no records) to the log and, when the webhook is set, to Discord. Off until the owner sets
+# the repository variable D1_BACKUP_ENABLED to "true" and adds D1_BACKUP_TOKEN and CLOUDFLARE_ACCOUNT_ID.
+on:
+  schedule:
+    - cron: "15 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: d1-count
+  cancel-in-progress: false
+
+jobs:
+  count:
+    if: ${{ vars.D1_BACKUP_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+          sparse-checkout: apps/sync/wrangler.toml
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Count accounts
+        working-directory: apps/sync
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.D1_BACKUP_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          out=$(npx --yes wrangler@4 d1 execute sideboard-sage-sync --remote --json --command "SELECT COUNT(*) AS n FROM users")
+          n=$(printf '%s' "$out" | jq -r '.[0].results[0].n')
+          case "$n" in ''|*[!0-9]*) echo "no count"; exit 1;; esac
+          echo "Accounts: $n"
+          [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "Accounts: $n" '{content:$c}')" "$HOOK" || true
