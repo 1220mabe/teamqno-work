@@ -381,28 +381,13 @@ jobs:
   # Deploys only after the checks pass, and only from main: the tested site plus the fresh data.
   # Turn on by setting the repo variable DEPLOY_ENABLED=true and adding the
   # secrets CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID. See docs/DEPLOY.md.
-  deploy:
-    # One deploy at a time, in order: two overlapping deploys could ship out of order and post twice.
-    concurrency:
-      group: deploy-main
-      cancel-in-progress: false
-    needs: [ref, web-unit, sync-unit, sync-e2e, site, web-e2e, pipeline, data, mark]
-    # A commit that was already tested skips the test jobs (they count as skipped, not failed).
-    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && vars.DEPLOY_ENABLED == 'true' }}
+  # The pages are written while the browser tests run, so the deploy only uploads (about a minute off the critical path).
+  pages:
+    needs: [ref, site, data]
+    if: ${{ !cancelled() && needs.site.result == 'success' && needs.data.result == 'success' && vars.DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    # Posting secrets are not in the job env: install, build and the Cloudflare deploy never see them. Only the
-    # steps that post get them, and the `flags` step (in the `ref` job) tells them which ones are set.
-    env:
-      X_POSTING: ${{ vars.X_POSTING }}
-      SOCIAL_POSTING: ${{ vars.SOCIAL_POSTING }}
-      X_MONTHLY_CAP: ${{ vars.X_MONTHLY_CAP }}
-      X_DAILY_CAP: ${{ vars.X_DAILY_CAP }}
-      BUFFER_POSTING: ${{ vars.BUFFER_POSTING }}
-      BUFFER_DAILY_CAP: ${{ vars.BUFFER_DAILY_CAP }}
-      BUFFER_MONTHLY_CAP: ${{ vars.BUFFER_MONTHLY_CAP }}
-      BUFFER_LEAGUE_RESERVE: ${{ vars.BUFFER_LEAGUE_RESERVE }}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -440,6 +425,58 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm seo --site "$GITHUB_WORKSPACE/out" --cache "$GITHUB_WORKSPACE/og-cache" --budget 120
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pages
+          path: out
+          compression-level: 0
+          retention-days: 1
+
+  deploy:
+    # One deploy at a time, in order: two overlapping deploys could ship out of order and post twice.
+    concurrency:
+      group: deploy-main
+      cancel-in-progress: false
+    needs: [ref, web-unit, sync-unit, sync-e2e, site, web-e2e, pipeline, data, mark, pages]
+    # A commit that was already tested skips the test jobs (they count as skipped, not failed).
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && vars.DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Posting secrets are not in the job env: install, build and the Cloudflare deploy never see them. Only the
+    # steps that post get them, and the `flags` step (in the `ref` job) tells them which ones are set.
+    env:
+      X_POSTING: ${{ vars.X_POSTING }}
+      SOCIAL_POSTING: ${{ vars.SOCIAL_POSTING }}
+      X_MONTHLY_CAP: ${{ vars.X_MONTHLY_CAP }}
+      X_DAILY_CAP: ${{ vars.X_DAILY_CAP }}
+      BUFFER_POSTING: ${{ vars.BUFFER_POSTING }}
+      BUFFER_DAILY_CAP: ${{ vars.BUFFER_DAILY_CAP }}
+      BUFFER_MONTHLY_CAP: ${{ vars.BUFFER_MONTHLY_CAP }}
+      BUFFER_LEAGUE_RESERVE: ${{ vars.BUFFER_LEAGUE_RESERVE }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: pages
+          path: out
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+          ref: ${{ needs.ref.outputs.sha }}
+          path: repo
+          sparse-checkout: apps/web
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          package_json_file: repo/apps/web/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: repo/apps/web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: repo/apps/web
       # What is live right now, saved before the deploy so the announcement step can tell which tournaments are new.
       # A format whose index cannot be fetched is skipped: announce nothing rather than flood the channel.
       - name: Save the live tournament indexes
