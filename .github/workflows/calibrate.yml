@@ -55,6 +55,30 @@ jobs:
           size=$(du -sm history | cut -f1)
           echo "history is ${size} MB"
           [ "$size" -lt 150 ] || echo "::warning::history is over 150 MB; review how much to keep"
+      - name: Tell Discord about new provisional names (once, when they first appear)
+        # Compares the refreshed drafts with the committed ones, so a name is announced only the week it is born.
+        continue-on-error: true
+        working-directory: pipeline
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          new=$(uv run python - <<'PY'
+          import subprocess, yaml
+          from pathlib import Path
+          out = []
+          for f in sorted(Path("../data/archetypes").glob("*.draft.yaml")):
+              now = (yaml.safe_load(f.read_text(encoding="utf-8")) or {}).get("archetypes") or []
+              old = subprocess.run(["git", "show", f"HEAD:data/archetypes/{f.name}"], capture_output=True, text=True).stdout
+              seen = {a["name"] for a in (yaml.safe_load(old) or {}).get("archetypes") or []} if old else set()
+              out += [f"{a['name']} ({f.name.split('.')[0]}, {a.get('share', 0):.1%})" for a in now if a["name"] not in seen and a.get("share", 0) >= 0.01]
+          print("; ".join(out))
+          PY
+          )
+          [ -n "$new" ] || exit 0
+          echo "::notice::new provisional names: $new"
+          [ -n "$HOOK" ] || exit 0
+          MSG="New archetype names to review: $new. Promote one with: python -m sideboard_sage_pipeline promote-name --format <Format> --name \"<name>\" [--as \"<name players say>\"]"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
       - name: Commit new history and the calibration when they changed
         env:
           SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
