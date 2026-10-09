@@ -312,20 +312,40 @@ jobs:
       # Pre-publish gate (#135), report-only until it has run clean on real data for a while: a failed check alerts Discord but does not
       # stop the deploy (a false positive must never wedge a deploy). To make it blocking, add `[ "$rc" -eq 1 ] && exit 1` after the alert.
       # The problems (counts and names only, no source) go to Discord when the webhook is set.
+      # The same findings alert once a day at most (#174): the key is a hash of the findings plus the date, kept in the Actions cache.
       - name: Data gate
+        id: gate
         working-directory: pipeline
-        env:
-          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           # Exit 1 = a data problem, 2 = only late or disagreeing sources (alert, never block: the other sources' data ships).
           rc=0
           uv run python -m sideboard_sage_pipeline gate > gate.txt || rc=$?
           cat gate.txt
-          if [ "$rc" -ne 0 ]; then
-            MSG="Data gate warning (report only, deploy continues): $RUN"$'\n'"$(head -c 1500 gate.txt)"
-            [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
-          fi
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "key=gate-alert-$(date -u +%F)-$(sed -E 's/[0-9]+:[0-9]+//g' gate.txt | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - name: Data gate seen today
+        if: steps.gate.outputs.rc != '0'
+        id: gate-seen
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: pipeline/gate.txt
+          key: ${{ steps.gate.outputs.key }}
+          lookup-only: true
+      - name: Data gate alert
+        if: steps.gate.outputs.rc != '0' && steps.gate-seen.outputs.cache-hit != 'true'
+        working-directory: pipeline
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          MSG="Data gate warning (report only, deploy continues): $RUN"$'\n'"$(head -c 1500 gate.txt)"
+          [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
+      - name: Data gate remember
+        if: steps.gate.outputs.rc != '0' && steps.gate-seen.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: pipeline/gate.txt
+          key: ${{ steps.gate.outputs.key }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: api
