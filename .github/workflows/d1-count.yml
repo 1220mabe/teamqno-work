@@ -2,7 +2,7 @@ name: D1 count
 
 # One number for the owner: how many accounts exist (#175). Runs with the same read token as the backup and prints
 # only the count (no emails, no records) to the log and, when the webhook is set, to Discord. Off until the owner sets
-# the repository variable D1_BACKUP_ENABLED to "true" and adds D1_BACKUP_TOKEN and CLOUDFLARE_ACCOUNT_ID.
+# the repository variable D1_COUNT_ENABLED to "true" and adds D1_BACKUP_TOKEN and CLOUDFLARE_ACCOUNT_ID.
 on:
   schedule:
     - cron: "15 6 * * 1"
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   count:
-    if: ${{ vars.D1_BACKUP_ENABLED == 'true' }}
+    if: ${{ vars.D1_COUNT_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
