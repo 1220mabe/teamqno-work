@@ -1,0 +1,70 @@
+name: Propose names
+
+# Daily: cluster the recent lists no archetype name claims (Other), propose a provisional name per cluster
+# ({colors} {strategy}) and commit data/archetype_proposals.json. A review list only: no rule, win rate or page
+# reads it, so it can never block a deploy. New proposals with top finishes go to Discord once, with the
+# promote-name command (docs/ALGORITHM.md section 2, Issue #146). No LLM is involved.
+on:
+  schedule:
+    - cron: "40 5 * * *"
+  workflow_dispatch:
+
+permissions: {} # the checkout and the push use the deploy key; nothing here needs the workflow token
+
+jobs:
+  propose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      - name: Propose names from the recent lists
+        working-directory: pipeline
+        # The command skips a failing source or format on its own and keeps the old entries.
+        continue-on-error: true
+        env:
+          TOPDECK_API_KEY: ${{ secrets.TOPDECK_API_KEY }}
+        run: |
+          uv sync --locked
+          uv run python -m sideboard_sage_pipeline cards
+          uv run python -m sideboard_sage_pipeline propose-names
+      - name: Tell Discord about new proposals (once, when a name first appears)
+        continue-on-error: true
+        working-directory: pipeline
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          new=$(uv run python - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          f = Path("../data/archetype_proposals.json")
+          if f.exists():
+              now = json.loads(f.read_text(encoding="utf-8")).get("formats", {})
+              old = subprocess.run(["git", "show", "HEAD:data/archetype_proposals.json"], capture_output=True, text=True).stdout
+              seen = {(fmt, p["name"]) for fmt, ps in (json.loads(old).get("formats", {}) if old else {}).items() for p in ps}
+              print("; ".join(f"{p['name']} ({fmt}, {p['decks']} decks, {p['top8']} top-8)" for fmt, ps in sorted(now.items()) for p in ps if (fmt, p["name"]) not in seen and (p["top8"] >= 1 or p["decks"] >= 6)))
+          PY
+          )
+          [ -n "$new" ] || exit 0
+          echo "::notice::new proposed names: $new"
+          [ -n "$HOOK" ] || exit 0
+          MSG="Unnamed decks to review: $new. Promote one with: python -m sideboard_sage_pipeline promote-name --format <Format> --name \"<name>\" [--as \"<name players say>\"]"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
+      - name: Commit the proposals when they changed
+        env:
+          SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
+        run: |
+          git config user.name "calibration-bot"
+          git config user.email "calibration-bot@users.noreply.github.com"
+          git add data/archetype_proposals.json
+          if ! git diff --cached --quiet; then
+            git commit -m "data: proposed archetype names"
+            umask 077
+            printf '%s\n' "$SOURCE_WRITE_KEY" > "$RUNNER_TEMP/wkey"
+            GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/wkey -o StrictHostKeyChecking=accept-new" git push git@github.com:1220mabe/sideboard-sage.git HEAD:main
+            rm -f "$RUNNER_TEMP/wkey"
+          fi
