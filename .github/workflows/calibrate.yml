@@ -50,6 +50,10 @@ jobs:
         env:
           TOPDECK_API_KEY: ${{ secrets.TOPDECK_API_KEY }}
         run: uv run python -m sideboard_sage_pipeline answers
+      - name: Test whether the per-opponent swap beats not swapping (held-out, writes data/board_eval.json)
+        working-directory: pipeline
+        continue-on-error: true
+        run: uv run python -m sideboard_sage_pipeline board-eval
       - name: Warn if the history folder grows large
         run: |
           size=$(du -sm history | cut -f1)
@@ -85,7 +89,7 @@ jobs:
         run: |
           git config user.name "calibration-bot"
           git config user.email "calibration-bot@users.noreply.github.com"
-          git add -A history data/calibration.json data/archetypes $(ls -d data/models data/answers_scoreboard.json data/names_coverage.json 2>/dev/null)
+          git add -A history data/calibration.json data/board_eval.json data/archetypes $(ls -d data/models data/answers_scoreboard.json data/names_coverage.json 2>/dev/null)
           if ! git diff --cached --quiet; then
             git commit -m "data: weekly history, archetype rules, calibration and answer scoreboard"
             # The read key used for the checkout cannot push. The write key exists only in this step, after every
