@@ -1,7 +1,8 @@
 name: Coverage audit
 
-# Every 6 hours (seconds of runtime): events per format and source in the last 14 days, hours from the event day to its
-# appearance on the live site, and big events (data/big_events.yaml) with no data. The result is the run summary (#79).
+# Daily (seconds of runtime): events per format and source in the last 14 days, hours from the event day to its
+# appearance on the live site, big events (data/big_events.yaml) with no data, and formats whose paper intake went
+# quiet. The result is the run summary (#79); problems are also posted to Discord (#52).
 # The first-seen ledger lives in the Actions cache, so no secret and no commit is needed.
 on:
   schedule:
@@ -34,7 +35,15 @@ jobs:
         working-directory: pipeline
         run: |
           uv sync --locked
-          uv run python -m sideboard_sage_pipeline coverage-audit | tee "$GITHUB_STEP_SUMMARY"
+          uv run python -m sideboard_sage_pipeline coverage-audit --alerts ../coverage-alerts.txt | tee "$GITHUB_STEP_SUMMARY"
+      - name: Tell Discord about missing paper events
+        if: hashFiles('coverage-alerts.txt') != ''
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          [ -n "$HOOK" ] && [ -s coverage-alerts.txt ] || exit 0
+          MSG="Paper coverage gap (add the event by hand or check the source, docs/OPERATIONS.md): $(head -c 900 coverage-alerts.txt) Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: pipeline/data/coverage-ledger.json
