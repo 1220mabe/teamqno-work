@@ -1,0 +1,62 @@
+name: Budget watch
+
+# Sums this month's Actions minutes of this repository through the runs API (Issue #100). From 70 percent it sends a
+# Discord message; from 85 it switches the optional workflows off, from 95 only the refresh ("CI") keeps running; in
+# a new month (back under 85) it switches them on again. Off until the owner sets BUDGET_WATCH_ENABLED to "true": a
+# public repository has no minute limit, so this is for the day the runner is private. BUDGET_MINUTES is the plan's
+# quota (default 2000). The workflow token only needs actions: write to disable and enable workflows.
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+concurrency:
+  group: budget-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    if: ${{ vars.BUDGET_WATCH_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+          sparse-checkout: scripts
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Sum the minutes and switch workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          QUOTA: ${{ vars.BUDGET_MINUTES || '2000' }}
+        run: |
+          out=$(node scripts/budget-watch.mjs "$GITHUB_REPOSITORY" "$QUOTA")
+          echo "$out" | jq -c '{used,quota,pct,level}'
+          level=$(echo "$out" | jq -r .level)
+          # Only touch a workflow whose state differs, so nothing is switched twice.
+          states=$(gh workflow list --all --json name,state)
+          state_of() { echo "$states" | jq -r --arg n "$1" '.[] | select(.name == $n) | .state' | head -1; }
+          echo "$out" | jq -r '.disable[]' | while IFS= read -r name; do
+            state=$(state_of "$name")
+            [ "$state" = active ] && gh workflow disable "$name" || true
+          done
+          # Back under 85 percent (a new month): switch on what was switched off.
+          if [ "$level" -lt 2 ]; then
+            echo "$out" | jq -r '.enable[]' | while IFS= read -r name; do
+              state=$(state_of "$name")
+              [ "$state" = disabled_manually ] && gh workflow enable "$name" || true
+            done
+          fi
+          if [ "$level" -ge 1 ] && [ -n "$HOOK" ]; then
+            msg=$(echo "$out" | jq -r '"Actions minutes: \(.used) of \(.quota) (\(.pct) percent), level \(.level). " + (if .level >= 3 then "Only the refresh runs." elif .level == 2 then "Optional workflows are off." else "Watching." end)')
+            curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c}')" "$HOOK" || true
+          fi
