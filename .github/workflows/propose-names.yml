@@ -65,6 +65,9 @@ jobs:
             git commit -m "data: proposed archetype names"
             umask 077
             printf '%s\n' "$SOURCE_WRITE_KEY" > "$RUNNER_TEMP/wkey"
-            GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/wkey -o StrictHostKeyChecking=accept-new" git push git@github.com:1220mabe/sideboard-sage.git HEAD:main
+            export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/wkey -o StrictHostKeyChecking=accept-new"
+            # main moves while the batch runs (a long job); rebase onto it so the push is a fast-forward.
+            git pull --rebase git@github.com:1220mabe/sideboard-sage.git main
+            git push git@github.com:1220mabe/sideboard-sage.git HEAD:main
             rm -f "$RUNNER_TEMP/wkey"
           fi
