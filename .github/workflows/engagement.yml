@@ -1,0 +1,74 @@
+name: Engagement loop
+
+# Nightly: read the like, repost and reply counts of our own Bluesky and Mastodon posts from their public read APIs
+# (no keys) and commit data/engagement/posts.json (post id, template, hour, counts; no text, no names).
+# Mondays: rank the templates on settled posts and commit data/engagement/suggested-mix.json, with a Discord note.
+# The owner approves by copying the suggestion into data/engagement/approved-mix.json. Nothing posts, nothing on the
+# site reads these files, no LLM is involved, and any failure skips the run (Issue #144, docs/OPERATIONS.md).
+on:
+  schedule:
+    - cron: "20 2 * * *"
+  workflow_dispatch:
+
+permissions: {} # the checkout and the push use the deploy keys; nothing here needs the workflow token
+
+concurrency:
+  group: engagement
+  cancel-in-progress: false
+
+jobs:
+  engagement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          ref: main
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          package_json_file: apps/web/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Unit tests of the ranking code (a broken change must not write)
+        working-directory: apps/web
+        run: |
+          # The tests need the dev dependencies; the scripts themselves use only Node.
+          pnpm install --frozen-lockfile --prefer-offline >/dev/null 2>&1 || exit 1
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec vitest run src/lib/engagement.test.ts scripts/engagement.run.test.ts
+      - name: Read the counts of our own posts
+        continue-on-error: true
+        working-directory: apps/web
+        env:
+          ENGAGEMENT_BSKY_HANDLE: ${{ vars.ENGAGEMENT_BSKY_HANDLE }}
+          ENGAGEMENT_MASTODON: ${{ vars.ENGAGEMENT_MASTODON }}
+        run: pnpm engagement --collect
+      - name: Weekly ranking (Mondays)
+        continue-on-error: true
+        working-directory: apps/web
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ "$(date -u +%u)" = "1" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then pnpm engagement --rank; fi
+      - name: Commit data/engagement when it changed
+        continue-on-error: true
+        env:
+          SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
+        run: |
+          git config user.name "engagement-bot"
+          git config user.email "engagement-bot@users.noreply.github.com"
+          git add data/engagement
+          if ! git diff --cached --quiet; then
+            git commit -m "data: engagement counts"
+            umask 077
+            printf '%s\n' "$SOURCE_WRITE_KEY" > "$RUNNER_TEMP/wkey"
+            # GitHub's published ed25519 host key, pinned instead of trusting the first answer.
+            echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$RUNNER_TEMP/known_hosts"
+            export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/wkey -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o StrictHostKeyChecking=yes"
+            git pull --rebase git@github.com:1220mabe/sideboard-sage.git main
+            git push git@github.com:1220mabe/sideboard-sage.git HEAD:main
+            rm -f "$RUNNER_TEMP/wkey"
+          fi
