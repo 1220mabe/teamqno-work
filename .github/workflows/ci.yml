@@ -502,6 +502,25 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy out --project-name=sideboard-sage --branch=main
+      # Post-deploy smoke test (Issue #100): about 10 seconds. Key pages answer 200 and the JSON just shipped is the
+      # build in `out` and not an empty file. Failure only alerts (Discord); a rollback stays a manual dashboard step.
+      - name: Smoke test the deployed site
+        continue-on-error: true
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          base="https://sideboard-sage.pages.dev"
+          fail=""
+          for p in / /tournaments/ /meta/ /decks/ /api/v1/status.json /api/v1/metagame/standard.json; do
+            curl -fsS --max-time 20 --retry 4 --retry-delay 5 --retry-all-errors -o /dev/null "$base$p" || fail="$fail $p"
+          done
+          want=$(jq -r .generated_at out/api/v1/status.json)
+          live=$(curl -fsS --max-time 20 --retry 4 --retry-delay 5 "$base/api/v1/status.json" | jq -r .generated_at || true)
+          [ "$want" = "$live" ] || fail="$fail status-not-fresh($live)"
+          [ -z "$fail" ] && { echo "smoke ok"; exit 0; }
+          echo "::error::smoke test failed:$fail"
+          [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "Post-deploy smoke test failed:$fail. Roll back in the Cloudflare dashboard if the site is broken (docs/DEPLOY.md). Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" '{content:$c}')" "$HOOK" || true
+          exit 1
       # Optional automatic posting to X (docs/OPERATIONS.md, "X posting"). Does nothing without all four secrets or
       # when the variable X_POSTING is "off". The ledger (posted ids and the monthly counter) lives in the Actions cache.
       - name: Restore X ledger

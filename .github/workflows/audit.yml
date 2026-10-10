@@ -36,6 +36,23 @@ jobs:
         run: |
           uv export --no-dev --no-hashes -o ../requirements-audit.txt >/dev/null 2>&1
           uvx pip-audit -r ../requirements-audit.txt --progress-spinner off 2>&1 | tee ../py-audit.txt
+      # Runtime drift (Issue #100): a newer major of Next.js, React or the Node LTS line than the one we ship is a
+      # reminder, not a failure. Reads the registries only; about 5 seconds.
+      - name: Runtime and framework majors
+        id: drift
+        working-directory: apps/web
+        run: |
+          : > ../../drift.txt
+          for pkg in next react tailwindcss; do
+            have=$(jq -r --arg p "$pkg" '(.dependencies[$p] // .devDependencies[$p] // "") | ltrimstr("^") | ltrimstr("~") | split(".")[0]' package.json)
+            [ -n "$have" ] || continue
+            latest=$(curl -fsS --max-time 15 "https://registry.npmjs.org/$pkg/latest" | jq -r '.version | split(".")[0]') || continue
+            [ "$have" = "$latest" ] || echo "$pkg $have -> $latest" >> ../../drift.txt
+          done
+          ci_node=$(grep -m1 'node-version:' ../../runner/ci.yml 2>/dev/null | grep -o '[0-9]*' || true)
+          lts=$(curl -fsS --max-time 15 https://nodejs.org/dist/index.json | jq -r '[.[] | select(.lts != false)][0].version | ltrimstr("v") | split(".")[0]') || lts=""
+          [ -n "$lts" ] && [ -n "$ci_node" ] && [ "$ci_node" != "$lts" ] && echo "node $ci_node -> LTS $lts" >> ../../drift.txt || true
+          cat ../../drift.txt
       - name: Tell Discord when something was found
         if: steps.web.outcome == 'failure' || steps.py.outcome == 'failure'
         env:
@@ -43,4 +60,12 @@ jobs:
         run: |
           [ -n "$HOOK" ] || exit 0
           MSG="The weekly dependency audit found known vulnerabilities. Update the packages (a major bump needs a look). Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
+      - name: Tell Discord about newer majors
+        if: always() && hashFiles('drift.txt') != ''
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          [ -n "$HOOK" ] && [ -s drift.txt ] || exit 0
+          MSG="Newer major versions exist (plan the upgrade, docs/OPERATIONS.md quarterly checklist): $(tr '\n' ';' < drift.txt | head -c 600)"
           curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
