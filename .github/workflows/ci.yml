@@ -317,7 +317,7 @@ jobs:
           # cannot be rebuilt from the data, so it is carried over). A failed fetch removes the file: no ban news, nothing lost.
           mkdir -p data ../apps/web/public/api/v1/news
           curl -fsS --max-time 20 --retry 2 "https://sideboard-sage.pages.dev/api/v1/legality.json" -o data/legality-before.json || rm -f data/legality-before.json
-          for f in standard modern pioneer legacy vintage pauper; do
+          for f in standard modern pioneer legacy vintage pauper premodern; do
             curl -fsS --max-time 20 --retry 2 "https://sideboard-sage.pages.dev/api/v1/news/$f.json" -o "../apps/web/public/api/v1/news/$f.json" || rm -f "../apps/web/public/api/v1/news/$f.json"
           done
           uv run python -m sideboard_sage_pipeline cards

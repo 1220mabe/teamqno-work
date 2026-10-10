@@ -23,7 +23,7 @@ jobs:
           curl -fsS --retry 3 --retry-delay 10 -o /dev/null "$base/tournaments/"
           curl -fsS --retry 3 --retry-delay 10 "$base/api/v1/status.json" -o status.json
           curl -fsS --retry 3 --retry-delay 10 "$base/api/v1/news/index.json" -o news.json
-          for f in standard modern pioneer legacy vintage pauper; do
+          for f in standard modern pioneer legacy vintage pauper premodern; do
             curl -fsS --retry 3 --retry-delay 10 "$base/api/v1/metagame/$f.json" -o "m-$f.json"
             curl -fsS --retry 3 --retry-delay 10 "$base/api/v1/tournaments/$f/index.json" -o "t-$f.json"
           done
@@ -35,7 +35,9 @@ jobs:
           s = json.load(open("status.json"))
           if s["counts"]["cards"] < 20000:
               problems.append("card count too low")
-          for f in ["standard", "modern", "pioneer", "legacy", "vintage", "pauper"]:
+          FORMATS = ["standard", "modern", "pioneer", "legacy", "vintage", "pauper", "premodern"]
+          PAPER_ONLY = {"premodern"}  # TopDeck.gg only: no MTGO event types to check
+          for f in FORMATS:
               m = json.load(open(f"m-{f}.json"))
               age = now - datetime.fromisoformat(m["generated_at"])
               print(f, "decks", m["decks"], "age", age)
@@ -45,7 +47,7 @@ jobs:
                   problems.append(f"{f} has only {m['decks']} decks")
           # generated_at is the build time, so a stalled source cannot show there: look at the newest event itself (#110).
           newest = ""
-          for f in ["standard", "modern", "pioneer", "legacy", "vintage", "pauper"]:
+          for f in FORMATS:
               t = json.load(open(f"t-{f}.json"))
               events = t.get("events", []) if isinstance(t, dict) else t
               newest = max([newest] + [e.get("date", "") for e in events])
@@ -57,7 +59,9 @@ jobs:
               problems.append(f"no event newer than {newest or 'never'} in any format (a source may have stalled)")
           # Per format and event type (status.json "latest_events"): a stale Challenge fails, a stale League only warns.
           today = now.date()
-          for f in ["standard", "modern", "pioneer", "legacy", "vintage", "pauper"]:
+          for f in FORMATS:
+              if f in PAPER_ONLY:
+                  continue
               latest = s.get("latest_events", {}).get(f, {})
               for kind, limit, fails in (("challenge", 3, True), ("league", 2, False)):
                   day = latest.get(kind)
