@@ -58,6 +58,36 @@ jobs:
         working-directory: pipeline
         continue-on-error: true
         run: uv run python -m sideboard_sage_pipeline main-eval
+      - name: Write this week's analyst column when a finding passes the gates (Issue #183; nothing in a quiet week)
+        id: column
+        continue-on-error: true
+        working-directory: pipeline
+        run: |
+          uv run python -m sideboard_sage_pipeline analyst-column | tee "$RUNNER_TEMP/column.log"
+          slug=$(sed -n 's/^analyst: wrote \([a-z0-9-]*\) .*/\1/p' "$RUNNER_TEMP/column.log")
+          echo "slug=$slug" >> "$GITHUB_OUTPUT"
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        if: steps.column.outputs.slug != ''
+        with:
+          package_json_file: apps/web/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        if: steps.column.outputs.slug != ''
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - name: Check the column against the writing and figure tests, and draw its thumbnails; drop it on any failure
+        if: steps.column.outputs.slug != ''
+        continue-on-error: true
+        working-directory: apps/web
+        env:
+          SLUG: ${{ steps.column.outputs.slug }}
+        run: |
+          drop() { rm -f "content/articles/$SLUG.md" "content/articles/$SLUG.ja.md" public/media/"$SLUG".png public/media/"$SLUG".ja.png "public/media/fig-$SLUG.svg"; git checkout -- content/articles/card-images.json; echo "::warning::analyst column $SLUG dropped: $1"; }
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm install --frozen-lockfile || { drop "install failed"; exit 0; }
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec vitest run src/lib/columnVoice.test.ts src/lib/articles.test.ts || { drop "a column test failed"; exit 0; }
+          # The drawn thumbnail needs a browser and Scryfall; when either fails the generic image written by the generator stays.
+          (bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec playwright install --with-deps chromium && node scripts/column-thumbs.mjs "$SLUG") || echo "::warning::column thumbnails not drawn; the generic image stands in"
       - name: Warn if the history folder grows large
         run: |
           size=$(du -sm history | cut -f1)
@@ -94,8 +124,10 @@ jobs:
           git config user.name "calibration-bot"
           git config user.email "calibration-bot@users.noreply.github.com"
           git add -A history data/calibration.json data/board_eval.json data/main_eval.json data/archetypes $(ls -d data/models data/answers_scoreboard.json data/names_coverage.json 2>/dev/null)
+          # The analyst column, only when it survived the checks above (its files are gone otherwise).
+          git add -A apps/web/content/articles apps/web/public/media
           if ! git diff --cached --quiet; then
-            git commit -m "data: weekly history, archetype rules, calibration and answer scoreboard"
+            git commit -m "data: weekly history, archetype rules, calibration, answer scoreboard and analyst column"
             # The read key used for the checkout cannot push. The write key exists only in this step, after every
             # dependency install has run, and is deleted at the end.
             umask 077
