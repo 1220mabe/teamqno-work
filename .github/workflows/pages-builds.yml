@@ -1,0 +1,40 @@
+name: Pages builds
+
+# Alarm for the Cloudflare Pages limit of 500 builds a month (Issue #212). Every successful CI run uploads one
+# deployment, so this counts this month's successful CI runs through the runs API. From 80 percent (400) it fails
+# loudly and posts to Discord; the failed run is the alert. It never writes anything. Stop adding schedules or
+# `make deploy` runs when it fires.
+on:
+  schedule:
+    - cron: "40 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+
+concurrency:
+  group: pages-builds
+  cancel-in-progress: false
+
+jobs:
+  count:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Count this month's deployments
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          LIMIT: ${{ vars.PAGES_BUILD_LIMIT || '500' }}
+        run: |
+          since=$(date -u +%Y-%m-01)
+          n=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?status=success&created=>=$since&per_page=100" --jq '.workflow_runs | length' | awk '{s+=$1} END {print s+0}')
+          pct=$((n * 100 / LIMIT))
+          msg="Cloudflare Pages builds this month: $n of $LIMIT ($pct percent)."
+          echo "$msg"
+          if [ "$pct" -ge 80 ]; then
+            msg="$msg Over 80 percent: stop extra deploys and schedules (docs/DEPLOY.md, Limits to remember)."
+            echo "::error::$msg"
+            [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c}')" "$HOOK" || true
+            exit 1
+          fi
