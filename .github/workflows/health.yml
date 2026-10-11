@@ -23,7 +23,9 @@ jobs:
           curl -fsS --retry 3 --retry-delay 10 -o /dev/null "$base/tournaments/"
           curl -fsS --retry 3 --retry-delay 10 "$base/api/v1/status.json" -o status.json
           curl -fsS --retry 3 --retry-delay 10 "$base/api/v1/news/index.json" -o news.json
-          for f in standard modern pioneer legacy vintage pauper premodern; do
+          # The format list comes from the data (formats.json, written by the pipeline), so a new format needs no edit here.
+          curl -fsS --retry 3 --retry-delay 10 "$base/api/v1/formats.json" -o formats.json
+          for f in $(jq -r '.formats[]' formats.json); do
             curl -fsS --retry 3 --retry-delay 10 "$base/api/v1/metagame/$f.json" -o "m-$f.json"
             curl -fsS --retry 3 --retry-delay 10 "$base/api/v1/tournaments/$f/index.json" -o "t-$f.json"
           done
@@ -35,8 +37,9 @@ jobs:
           s = json.load(open("status.json"))
           if s["counts"]["cards"] < 20000:
               problems.append("card count too low")
-          FORMATS = ["standard", "modern", "pioneer", "legacy", "vintage", "pauper", "premodern"]
-          PAPER_ONLY = {"premodern"}  # TopDeck.gg only: no MTGO event types to check
+          fj = json.load(open("formats.json"))
+          FORMATS = fj["formats"]
+          PAPER_ONLY = set(FORMATS) - set(fj.get("mtgo") or [f for f in FORMATS if f != "premodern"])  # no MTGO event types to check
           for f in FORMATS:
               m = json.load(open(f"m-{f}.json"))
               age = now - datetime.fromisoformat(m["generated_at"])
@@ -76,6 +79,12 @@ jobs:
                       problems.append(line)
                   else:
                       print(f"::warning::{line}")
+          # Rule changes the code may not handle yet (pipeline rules_watch.py): never a failure, the next step tells the owner.
+          watch = s.get("rules_watch", [])
+          for line in watch:
+              print(f"::warning::rules watch: {line}")
+          if watch:
+              open("rules.txt", "w").write("\n".join(f"- {w}" for w in watch))
           for src in s.get("stale_sources", []):
               print(f"::warning::saved answer of {src} is older than the limit (stale-if-error); the source may be down")
           n = json.load(open("news.json"))
@@ -87,6 +96,14 @@ jobs:
               open("problems.txt", "w").write("\n".join(f"- {p}" for p in problems))
               sys.exit("; ".join(problems))
           PY
+      - name: Tell Discord about rule changes (once a day)
+        if: success() && hashFiles('rules.txt') != ''
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          [ -n "$HOOK" ] && [ "$(date -u +%H)" -lt 6 ] || exit 0
+          MSG="Rules watch: the card data shows something the code may not handle yet (update pipeline rules_watch.py once checked): $(head -c 900 rules.txt)"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
       - name: Tell Discord when the check failed
         if: failure()
         env:
