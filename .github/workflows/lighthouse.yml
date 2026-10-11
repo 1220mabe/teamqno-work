@@ -1,0 +1,88 @@
+name: Lighthouse
+
+# Weekly Lighthouse (mobile, default throttling) of the public site (Issue #218). It measures public URLs only and
+# copies no repository code. One run per page; the JSON artifact (scores and LCP only) is kept 7 days and the next
+# run compares against it. Fails (the failed run is the alert) when a score drops more than 10 points or LCP > 4 s.
+on:
+  schedule:
+    - cron: "20 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+
+concurrency:
+  group: lighthouse
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SITE: https://teamqno.work
+      PAGES: "/ /decks/ /meta/ /me/ /tournaments/ /journal/"
+    steps:
+      - name: Previous numbers
+        run: |
+          mkdir -p prev
+          id=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=lighthouse&per_page=1" --jq '.artifacts[0].id // empty')
+          if [ -n "$id" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > prev.zip && unzip -oq prev.zip -d prev || true
+          fi
+      - name: Measure
+        run: |
+          mkdir -p raw
+          for p in $PAGES; do
+            n=$(echo "$p" | tr '/' '_')
+            npx --yes lighthouse@13.0.1 "$SITE$p" --quiet --only-categories=performance --output=json --output-path="raw/$n.json" \
+              --chrome-flags="--headless=new --no-sandbox" || true
+          done
+      - name: Compare
+        run: |
+          mkdir -p out
+          node - <<'JS'
+          const fs = require("fs");
+          const pages = {};
+          for (const f of fs.readdirSync("raw")) {
+            try {
+              const r = JSON.parse(fs.readFileSync("raw/" + f));
+              pages[f.replace(/\.json$/, "")] = {
+                score: Math.round(r.categories.performance.score * 100),
+                lcp: Math.round(r.audits["largest-contentful-paint"].numericValue),
+                cls: +r.audits["cumulative-layout-shift"].numericValue.toFixed(3),
+                tbt: Math.round(r.audits["total-blocking-time"].numericValue),
+              };
+            } catch { /* a page that failed to measure is reported below */ }
+          }
+          let prev = {};
+          try { prev = JSON.parse(fs.readFileSync("prev/lighthouse.json")).pages || {}; } catch {}
+          const problems = [];
+          const want = process.env.PAGES.split(" ").map((p) => p.replace(/\//g, "_"));
+          for (const k of want) {
+            const c = pages[k];
+            if (!c) { problems.push(k + ": no result"); continue; }
+            if (c.lcp > 4000) problems.push(`${k}: LCP ${c.lcp} ms over 4000`);
+            if (prev[k] && prev[k].score - c.score > 10) problems.push(`${k}: score ${prev[k].score} to ${c.score}`);
+          }
+          fs.writeFileSync("out/lighthouse.json", JSON.stringify({ date: new Date().toISOString().slice(0, 10), pages }, null, 1));
+          console.log(JSON.stringify(pages));
+          if (problems.length) { fs.writeFileSync("problems.txt", problems.join("; ")); console.log(problems.join("\n")); }
+          JS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lighthouse
+          path: out/lighthouse.json
+          retention-days: 7
+      - name: Alert
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -s problems.txt ]; then
+            msg="Lighthouse regression: $(cat problems.txt)"
+            echo "::error::$msg"
+            [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c}')" "$HOOK" || true
+            exit 1
+          fi
