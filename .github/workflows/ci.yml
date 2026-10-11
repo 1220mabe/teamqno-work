@@ -420,11 +420,19 @@ jobs:
           path: og-cache
           key: og-${{ github.run_id }}
           restore-keys: og-
+      - name: Install the page writer
+        working-directory: repo/apps/web
+        run: pnpm install --frozen-lockfile
+      # PROVENANCE_KEY keys the data-file stamp (scripts/provenance.mjs, docs/SECURITY.md); without it the stamp is
+      # unkeyed and the deploy goes on. Only this step sees it: install scripts never do.
       - name: Write the format, archetype and tournament pages
         working-directory: repo/apps/web
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm seo --site "$GITHUB_WORKSPACE/out" --cache "$GITHUB_WORKSPACE/og-cache" --budget 120
+        env:
+          PROVENANCE_KEY: ${{ secrets.PROVENANCE_KEY }}
+        run: pnpm seo --site "$GITHUB_WORKSPACE/out" --cache "$GITHUB_WORKSPACE/og-cache" --budget 120
+      - name: Count the files (Cloudflare Pages allows 20,000)
+        working-directory: repo/apps/web
+        run: node scripts/budget.mjs --files --site "$GITHUB_WORKSPACE/out"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pages

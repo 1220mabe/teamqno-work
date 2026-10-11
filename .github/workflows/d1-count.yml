@@ -41,5 +41,10 @@ jobs:
           out=$(npx --yes wrangler@4 d1 execute sideboard-sage-sync --remote --json --command "SELECT COUNT(*) AS n FROM users")
           n=$(printf '%s' "$out" | jq -r '.[0].results[0].n')
           case "$n" in ''|*[!0-9]*) echo "no count"; exit 1;; esac
-          echo "Accounts: $n"
-          [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "Accounts: $n" '{content:$c}')" "$HOOK" || true
+          # Database size against the free 5 GB; from 3 GB the message says so (the limit stops writes, it never bills).
+          size=$(printf '%s' "$out" | jq -r '.[0].meta.size_after // 0')
+          mb=$((size / 1048576))
+          msg="Accounts: $n. Database: $mb MB of 5000."
+          [ "$mb" -ge 3000 ] && msg="$msg Over 3 GB: lower the per-account caps or prune (docs/DEPLOY.md, Growth limits)."
+          echo "$msg"
+          [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c}')" "$HOOK" || true
