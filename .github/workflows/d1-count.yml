@@ -1,7 +1,9 @@
 name: D1 count
 
-# One number for the owner: how many accounts exist (#175). Runs with the same read token as the backup and prints
-# only the count (no emails, no records) to the log and, when the webhook is set, to Discord. Off until the owner sets
+# One number for the owner: how many accounts exist (#175), and the weekly buy-funnel line (#239: opens, shop clicks and
+# click rate per placement, shop clicks toward the stop rule; counts only, nothing about a visitor). Runs with the same
+# read token as the backup and prints only these numbers (no emails, no records) to the log and, when the webhook is
+# set, to Discord. Off until the owner sets
 # the repository variable D1_COUNT_ENABLED to "true" and adds D1_BACKUP_TOKEN and CLOUDFLARE_ACCOUNT_ID.
 on:
   schedule:
@@ -26,7 +28,11 @@ jobs:
           repository: 1220mabe/sideboard-sage
           ssh-key: ${{ secrets.SOURCE_KEY }}
           persist-credentials: false
-          sparse-checkout: apps/sync/wrangler.toml
+          sparse-checkout: |
+            apps/sync/wrangler.toml
+            apps/sync/src/clickReport.ts
+            apps/sync/scripts/click-report.mjs
+            apps/web/src/lib/buyKeys.ts
           sparse-checkout-cone-mode: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
@@ -46,5 +52,17 @@ jobs:
           mb=$((size / 1048576))
           msg="Accounts: $n. Database: $mb MB of 5000."
           [ "$mb" -ge 3000 ] && msg="$msg Over 3 GB: lower the per-account caps or prune (docs/DEPLOY.md, Growth limits)."
+          echo "$msg"
+          [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c}')" "$HOOK" || true
+      - name: Buy funnel
+        working-directory: apps/sync
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.D1_BACKUP_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          # No clicks table yet (schema not applied) or no counts: one line saying so, never a failure.
+          out=$(npx --yes wrangler@4 d1 execute sideboard-sage-sync --remote --json --command "SELECT day, surface, shop, n FROM clicks WHERE day >= date('now', '-56 days')" 2>/dev/null) || out='[{"results":[]}]'
+          msg=$(printf '%s' "$out" | node --no-warnings scripts/click-report.mjs) || exit 0
           echo "$msg"
           [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c}')" "$HOOK" || true
