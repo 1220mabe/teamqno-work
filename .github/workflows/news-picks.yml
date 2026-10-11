@@ -4,10 +4,13 @@ name: News picks
 # first, then the source and credit. The take is drafted by Workers AI under a daily neuron cap, or by a fixed template.
 # Weekly (Mondays): a bake-off picks the draft model. Both commit small files under data/ai/ (a failed commit fails the job and alerts Discord; posts are claimed in a commit before they are sent, so a lost push can never cause a re-post) and are separate from the
 # deploy: a failure here never touches the site. See docs/OPERATIONS.md, "News picks".
+# Hourly (#168): the owner's hot-news list (data/news-hot.json) only, so an item added from a phone goes out within the hour.
+# An empty list stops after the checkout; a list with nothing new commits nothing.
 on:
   schedule:
     - cron: "40 7 * * *"
     - cron: "50 3 * * 1"
+    - cron: "7 * * * *"
   workflow_dispatch:
     inputs:
       bakeoff:
@@ -29,6 +32,7 @@ jobs:
       actions: read # download the data of the latest deploy
     env:
       BAKEOFF: ${{ github.event.inputs.bakeoff == 'true' || github.event.schedule == '50 3 * * 1' }}
+      HOT_ONLY: ${{ github.event.schedule == '7 * * * *' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -36,20 +40,31 @@ jobs:
           ssh-key: ${{ secrets.SOURCE_KEY }}
           ref: main
           persist-credentials: false
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+      - name: Hourly run with an empty hot list stops here
+        id: gate
+        run: |
+          if [ "$HOT_ONLY" = true ] && ! jq -e 'type == "array" and length > 0' data/news-hot.json > /dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "No hot item listed."
+          fi
+      - if: ${{ steps.gate.outputs.skip != 'true' }}
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           package_json_file: apps/web/package.json
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - if: ${{ steps.gate.outputs.skip != 'true' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
           cache: pnpm
           cache-dependency-path: apps/web/pnpm-lock.yaml
-      - run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm install --frozen-lockfile
+      - if: ${{ steps.gate.outputs.skip != 'true' }}
+        run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm install --frozen-lockfile
         working-directory: apps/web
       - name: Unit tests of the drafting code (a broken change must not post)
+        if: ${{ steps.gate.outputs.skip != 'true' }}
         working-directory: apps/web
         run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec vitest run src/lib/workersai.test.ts scripts/news-pick.test.ts scripts/news-pick.run.test.ts scripts/news-hot.test.ts
       - name: Get the data of the latest successful deploy
+        if: ${{ env.HOT_ONLY != 'true' }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -57,6 +72,7 @@ jobs:
           run=$(gh run list --workflow ci.yml --branch main --status success --limit 10 --json databaseId -q '.[0].databaseId')
           gh run download "$run" --name api --dir api-data
       - name: Helper that commits data/ai, retrying on a moved main, and fails loudly
+        if: ${{ steps.gate.outputs.skip != 'true' }}
         env:
           SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -109,7 +125,7 @@ jobs:
           pnpm news-pick --bakeoff || true
           cd "$GITHUB_WORKSPACE" && "$RUNNER_TEMP/persist.sh" "data: draft model bake-off"
       - name: Claim today's picks and commit the claim
-        if: ${{ env.BAKEOFF != 'true' }}
+        if: ${{ env.BAKEOFF != 'true' && steps.gate.outputs.skip != 'true' }}
         working-directory: apps/web
         env:
           CF_AI_TOKEN: ${{ secrets.CF_AI_TOKEN }}
@@ -118,6 +134,7 @@ jobs:
           AI_NEURON_CAP: ${{ vars.AI_NEURON_CAP }}
           NEWSPICK_POSTING: ${{ vars.NEWSPICK_POSTING }}
           NEWSPICK_DAILY_CAP: ${{ vars.NEWSPICK_DAILY_CAP }}
+          NEWSPICK_HOT_DAILY_CAP: ${{ vars.NEWSPICK_HOT_DAILY_CAP }}
           BUFFER_TOKEN: ${{ secrets.BUFFER_TOKEN }}
           BUFFER_CHANNEL_ID: ${{ secrets.BUFFER_CHANNEL_ID }}
           BUFFER_POSTING: ${{ vars.BUFFER_POSTING }}
@@ -125,10 +142,11 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
         run: |
-          pnpm news-pick --claim --data "$GITHUB_WORKSPACE/api-data/v1" || true
+          lane=""; [ "$HOT_ONLY" = true ] && lane="--hot-only"
+          pnpm news-pick --claim $lane --data "$GITHUB_WORKSPACE/api-data/v1" || true
           cd "$GITHUB_WORKSPACE" && "$RUNNER_TEMP/persist.sh" "data: news-pick claim"
       - name: Send the claimed posts, then commit the result
-        if: ${{ env.BAKEOFF != 'true' }}
+        if: ${{ env.BAKEOFF != 'true' && steps.gate.outputs.skip != 'true' }}
         working-directory: apps/web
         env:
           NEWSPICK_POSTING: ${{ vars.NEWSPICK_POSTING }}
@@ -138,8 +156,10 @@ jobs:
           BUFFER_DAILY_CAP: ${{ vars.BUFFER_DAILY_CAP }}
           BUFFER_MONTHLY_CAP: ${{ vars.BUFFER_MONTHLY_CAP }}
           NEWSPICK_DAILY_CAP: ${{ vars.NEWSPICK_DAILY_CAP }}
+          NEWSPICK_HOT_DAILY_CAP: ${{ vars.NEWSPICK_HOT_DAILY_CAP }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
         run: |
-          pnpm news-pick --send || true
+          lane=""; [ "$HOT_ONLY" = true ] && lane="--hot-only"
+          pnpm news-pick --send $lane || true
           cd "$GITHUB_WORKSPACE" && "$RUNNER_TEMP/persist.sh" "data: news-pick result"
