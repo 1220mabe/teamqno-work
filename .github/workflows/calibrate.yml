@@ -43,6 +43,23 @@ jobs:
           # Keep archetype rules current for new sets and rotation: names stay, signatures update, new decks are added.
           uv run python -m sideboard_sage_pipeline refresh-rules
           uv run python -m sideboard_sage_pipeline calibrate
+      - name: Cross-check Scryfall's card data against MTGJSON (check only; Discord on a disagreement)
+        # Names and legality in our formats (#135, pipeline/src/sideboard_sage_pipeline/mtgjson.py). Exit 2 = a disagreement;
+        # a failed download prints a skip and exits 0. Nothing from MTGJSON is published or committed.
+        continue-on-error: true
+        working-directory: pipeline
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          rc=0
+          uv run python -m sideboard_sage_pipeline cards-crosscheck > "$RUNNER_TEMP/cards-check.txt" || rc=$?
+          cat "$RUNNER_TEMP/cards-check.txt"
+          rm -f data/mtgjson-atomic.json.xz
+          if [ "$rc" -eq 2 ] && [ -n "$HOOK" ]; then
+            MSG="Card data cross-check (Scryfall vs MTGJSON): $RUN"$'\n'"$(head -c 1500 "$RUNNER_TEMP/cards-check.txt")"
+            curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
+          fi
       - name: Re-test the answer rankings; promote a better method or keep the deployed one
         working-directory: pipeline
         # A failure here never changes what the site shows: the model file is only rewritten on a promotion.
