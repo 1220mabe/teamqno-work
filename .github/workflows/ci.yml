@@ -203,6 +203,8 @@ jobs:
         env:
           # The optional account feature (docs/ACCOUNTS.md): set the repository variable SYNC_ENABLED to 1 only after the Worker is deployed.
           NEXT_PUBLIC_SYNC_ENABLED: ${{ vars.SYNC_ENABLED }}
+          # Service worker kill switch (docs/DEPLOY.md, "Service worker"): the repository variable SW_OFF=1 ships a worker that removes itself.
+          NEXT_PUBLIC_SW_OFF: ${{ vars.SW_OFF }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: site
