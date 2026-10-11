@@ -29,6 +29,12 @@ jobs:
         working-directory: apps/web
         continue-on-error: true
         run: pnpm audit --prod --audit-level=high 2>&1 | tee ../../web-audit.txt
+      # The accounts Worker has its own lockfile; it ships to Cloudflare, so it is audited in full.
+      - name: Accounts Worker dependencies
+        id: sync
+        working-directory: apps/sync
+        continue-on-error: true
+        run: pnpm audit --audit-level=high 2>&1 | tee ../../sync-audit.txt
       - name: Pipeline dependencies
         id: py
         working-directory: pipeline
@@ -54,7 +60,7 @@ jobs:
           [ -n "$lts" ] && [ -n "$ci_node" ] && [ "$ci_node" != "$lts" ] && echo "node $ci_node -> LTS $lts" >> ../../drift.txt || true
           cat ../../drift.txt
       - name: Tell Discord when something was found
-        if: steps.web.outcome == 'failure' || steps.py.outcome == 'failure'
+        if: steps.web.outcome == 'failure' || steps.sync.outcome == 'failure' || steps.py.outcome == 'failure'
         env:
           HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
