@@ -452,6 +452,11 @@ jobs:
         continue-on-error: true
         working-directory: repo/apps/web
         run: pnpm finding-image --site "$GITHUB_WORKSPACE/out" --file "$GITHUB_WORKSPACE/repo/data/sns_findings.json"
+      # The weekly matchup-matrix post's pictures: one per format with a usable matrix; the poster picks the one that is due. Never blocks the deploy.
+      - name: Draw the matchup matrix pictures
+        continue-on-error: true
+        working-directory: repo/apps/web
+        run: pnpm matrix-image --site "$GITHUB_WORKSPACE/out"
       - name: Count the files (Cloudflare Pages allows 20,000)
         working-directory: repo/apps/web
         run: node scripts/budget.mjs --files --site "$GITHUB_WORKSPACE/out"
