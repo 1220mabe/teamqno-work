@@ -268,6 +268,18 @@ jobs:
       - run: uv sync --locked
       - run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" uv run ruff check .
       - run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" uv run pytest -q
+      # The parameter backtest (Issue #269): the accepted PRIOR_MATCHES, HALF_LIFE_DAYS and LEAGUE_WEIGHT must still beat the
+      # values they replaced on the frozen archived months (data/backtest_gate.json). Reads the card file the data job caches.
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: pipeline/data
+          key: pipeline-data-none
+          restore-keys: pipeline-data-
+      - name: Backtest gate for the tuned parameters
+        run: |
+          # A failed Scryfall download is a data problem, not a parameter change: warn and let the deploy go on.
+          [ -f data/cards.sqlite ] || uv run python -m sideboard_sage_pipeline cards || { echo "::warning::backtest gate skipped: no card data"; exit 0; }
+          uv run python -m sideboard_sage_pipeline backtest-gate
 
   # The data files, built in parallel with the tests (they do not depend on each other).
   data:
