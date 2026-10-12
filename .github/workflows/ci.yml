@@ -447,6 +447,11 @@ jobs:
         env:
           PROVENANCE_KEY: ${{ secrets.PROVENANCE_KEY }}
         run: pnpm seo --site "$GITHUB_WORKSPACE/out" --cache "$GITHUB_WORKSPACE/og-cache" --budget 120
+      # The weekly SNS finding's picture (Issue #266): drawn only when data/sns_findings.json has a finding; never blocks the deploy.
+      - name: Draw the SNS finding picture
+        continue-on-error: true
+        working-directory: repo/apps/web
+        run: pnpm finding-image --site "$GITHUB_WORKSPACE/out" --file "$GITHUB_WORKSPACE/repo/data/sns_findings.json"
       - name: Count the files (Cloudflare Pages allows 20,000)
         working-directory: repo/apps/web
         run: node scripts/budget.mjs --files --site "$GITHUB_WORKSPACE/out"
