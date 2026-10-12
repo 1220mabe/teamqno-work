@@ -329,6 +329,9 @@ jobs:
           # Card roles for the playtest opponent, read from the local bulk file (no network); only the playtest loads them.
           uv run python -m sideboard_sage_pipeline roles
           uv run python -m sideboard_sage_pipeline metagame
+          # Pictures for list cards in no format's card file (a set newer than the bulk file), via /cards/collection;
+          # only asks when something is missing, and a failure only means card backs in the share images (Issue #249).
+          uv run python -m sideboard_sage_pipeline unlisted-art || echo "unlisted art: skipped"
       # Pre-publish gate (#135), report-only until it has run clean on real data for a while: a failed check alerts Discord but does not
       # stop the deploy (a false positive must never wedge a deploy). To make it blocking, add `[ "$rc" -eq 1 ] && exit 1` after the alert.
       # The problems (counts and names only, no source) go to Discord when the webhook is set.
