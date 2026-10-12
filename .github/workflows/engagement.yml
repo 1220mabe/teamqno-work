@@ -6,6 +6,8 @@ name: Engagement loop
 # ENGAGEMENT_AUTO_APPLY is off, approved-mix.json (the post order buffer-post.mjs reads), with a Discord note. Nothing posts, nothing on the
 # site reads these files, no LLM is involved, and any failure skips the run (Issue #144, docs/OPERATIONS.md).
 # Nightly too: data/metrics/rollup.json (scripts/rollup.mjs, docs/PLAN.md "Flywheel"): the week's followers and posts, stalled loops and revenue rungs.
+# And data/metrics/link-check.json (scripts/link-check.mjs, docs/OPERATIONS.md "Shop link check"): do our own outgoing shop links
+# still answer? One polite request per host and path a day, a Discord note when the dead set changes. Never part of a deploy.
 on:
   schedule:
     - cron: "20 2 * * *"
@@ -20,7 +22,7 @@ concurrency:
 jobs:
   engagement:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 16
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -39,7 +41,7 @@ jobs:
         run: |
           # The tests need the dev dependencies; the scripts themselves use only Node.
           pnpm install --frozen-lockfile --prefer-offline >/dev/null 2>&1 || exit 1
-          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec vitest run src/lib/engagement.test.ts scripts/engagement.run.test.ts src/lib/flywheel.test.ts scripts/rollup.run.test.ts
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec vitest run src/lib/engagement.test.ts scripts/engagement.run.test.ts src/lib/flywheel.test.ts scripts/rollup.run.test.ts scripts/link-check.test.ts
       - name: Read the counts of our own posts
         continue-on-error: true
         working-directory: apps/web
@@ -63,6 +65,13 @@ jobs:
           ENGAGEMENT_BSKY_HANDLE: ${{ vars.ENGAGEMENT_BSKY_HANDLE }}
           ENGAGEMENT_MASTODON: ${{ vars.ENGAGEMENT_MASTODON }}
         run: pnpm rollup
+      - name: Shop link check (our own outgoing shop links, once a day; Discord once per change)
+        continue-on-error: true
+        timeout-minutes: 6
+        working-directory: apps/web
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: pnpm link-check
       - name: Commit data/engagement and data/metrics when they changed
         continue-on-error: true
         env:
