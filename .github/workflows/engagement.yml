@@ -2,9 +2,10 @@ name: Engagement loop
 
 # Nightly: read the like, repost and reply counts of our own Bluesky and Mastodon posts from their public read APIs
 # (no keys) and commit data/engagement/posts.json (post id, template, hour, counts; no text, no names).
-# Mondays: rank the templates on settled posts and commit data/engagement/suggested-mix.json, with a Discord note.
-# The owner approves by copying the suggestion into data/engagement/approved-mix.json. Nothing posts, nothing on the
+# Mondays: rank the templates on settled posts and commit data/engagement/suggested-mix.json and, unless the variable
+# ENGAGEMENT_AUTO_APPLY is off, approved-mix.json (the post order buffer-post.mjs reads), with a Discord note. Nothing posts, nothing on the
 # site reads these files, no LLM is involved, and any failure skips the run (Issue #144, docs/OPERATIONS.md).
+# Nightly too: data/metrics/rollup.json (scripts/rollup.mjs, docs/PLAN.md "Flywheel"): the week's followers and posts, stalled loops and revenue rungs.
 on:
   schedule:
     - cron: "20 2 * * *"
@@ -38,7 +39,7 @@ jobs:
         run: |
           # The tests need the dev dependencies; the scripts themselves use only Node.
           pnpm install --frozen-lockfile --prefer-offline >/dev/null 2>&1 || exit 1
-          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec vitest run src/lib/engagement.test.ts scripts/engagement.run.test.ts
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec vitest run src/lib/engagement.test.ts scripts/engagement.run.test.ts src/lib/flywheel.test.ts scripts/rollup.run.test.ts
       - name: Read the counts of our own posts
         continue-on-error: true
         working-directory: apps/web
@@ -51,16 +52,25 @@ jobs:
         working-directory: apps/web
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          ENGAGEMENT_AUTO_APPLY: ${{ vars.ENGAGEMENT_AUTO_APPLY }}
         run: |
           if [ "$(date -u +%u)" = "1" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then pnpm engagement --rank; fi
-      - name: Commit data/engagement when it changed
+      - name: Flywheel rollup (this week's row, stalled loops, revenue rungs; Discord once per change)
+        continue-on-error: true
+        working-directory: apps/web
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          ENGAGEMENT_BSKY_HANDLE: ${{ vars.ENGAGEMENT_BSKY_HANDLE }}
+          ENGAGEMENT_MASTODON: ${{ vars.ENGAGEMENT_MASTODON }}
+        run: pnpm rollup
+      - name: Commit data/engagement and data/metrics when they changed
         continue-on-error: true
         env:
           SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
         run: |
           git config user.name "engagement-bot"
           git config user.email "engagement-bot@users.noreply.github.com"
-          git add data/engagement
+          git add data/engagement data/metrics
           if ! git diff --cached --quiet; then
             git commit -m "data: engagement counts"
             umask 077

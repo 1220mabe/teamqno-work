@@ -507,6 +507,14 @@ jobs:
             ;; esac
           # The Journal reports that were live: the ones not in it are new (a missing file announces no report).
           curl -fsS --max-time 15 --retry 2 "https://sideboard-sage.pages.dev/api/v1/news/index.json" -o prev-indexes/news-index.json || rm -f prev-indexes/news-index.json
+      # The live sitemaps, so the IndexNow step after the deploy sends only new or re-dated addresses (none if missing).
+      - name: Save the live sitemaps
+        continue-on-error: true
+        run: |
+          mkdir -p prev-sitemaps
+          for f in sitemap.xml sitemap-pages.xml; do
+            curl -fsS --max-time 20 --retry 2 "https://sideboard-sage.pages.dev/$f" -o "prev-sitemaps/$f" || rm -f "prev-sitemaps/$f"
+          done
       - uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -531,6 +539,11 @@ jobs:
           echo "::error::smoke test failed:$fail"
           [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "Post-deploy smoke test failed:$fail. Roll back in the Cloudflare dashboard if the site is broken (docs/DEPLOY.md). Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" '{content:$c}')" "$HOOK" || true
           exit 1
+      # IndexNow (Bing, Yandex, Naver, Seznam): the new and re-dated sitemap addresses, one POST, never fails the job.
+      - name: Tell search engines what changed
+        continue-on-error: true
+        working-directory: repo/apps/web
+        run: pnpm indexnow --out "$GITHUB_WORKSPACE/out" --previous "$GITHUB_WORKSPACE/prev-sitemaps"
       # Optional automatic posting to X (docs/OPERATIONS.md, "X posting"). Does nothing without all four secrets or
       # when the variable X_POSTING is "off". The ledger (posted ids and the monthly counter) lives in the Actions cache.
       - name: Restore X ledger
