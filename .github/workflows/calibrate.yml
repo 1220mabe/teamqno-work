@@ -21,7 +21,7 @@ permissions: {} # the checkout and the push use the deploy key; nothing here nee
 jobs:
   calibrate:
     runs-on: ubuntu-latest
-    timeout-minutes: 60 # the answer re-test (three protocols, tuned forward methods) takes about 25 minutes on a laptop
+    timeout-minutes: 150 # the two Monday runs on 2026-10-07 and 2026-10-12 were cancelled at 60 minutes inside the answer re-test (about 25 on a laptop), so no later step ran; the re-test now has its own limit below
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -64,6 +64,7 @@ jobs:
         working-directory: pipeline
         # A failure here never changes what the site shows: the model file is only rewritten on a promotion.
         continue-on-error: true
+        timeout-minutes: 70 # a slow runner must not take the archive, the analyst column and the commit down with it
         env:
           TOPDECK_API_KEY: ${{ secrets.TOPDECK_API_KEY }}
         run: uv run python -m sideboard_sage_pipeline answers
