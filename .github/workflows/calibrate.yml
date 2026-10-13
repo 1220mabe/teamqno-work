@@ -158,8 +158,15 @@ jobs:
             # dependency install has run, and is deleted at the end.
             umask 077
             printf '%s\n' "$SOURCE_WRITE_KEY" > "$RUNNER_TEMP/wkey"
-            GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/wkey -o StrictHostKeyChecking=accept-new" git push git@github.com:1220mabe/sideboard-sage.git HEAD:main
+            export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/wkey -o StrictHostKeyChecking=accept-new"
+            REMOTE=git@github.com:1220mabe/sideboard-sage.git
+            # A push to main during this long job (it runs over an hour) rejects ours: replay the one commit on the newest main and retry.
+            for attempt in 1 2 3 4; do
+              if git push "$REMOTE" HEAD:main; then rm -f "$RUNNER_TEMP/wkey"; exit 0; fi
+              git fetch --depth=1 "$REMOTE" main && git rebase --onto FETCH_HEAD HEAD~1 || exit 1
+            done
             rm -f "$RUNNER_TEMP/wkey"
+            exit 1
           fi
       - name: Ask for a names review when community names cover too few decks
         # Fails soft: a new set often brings decks the dictionary does not know yet (docs/ALGORITHM.md section 2).
