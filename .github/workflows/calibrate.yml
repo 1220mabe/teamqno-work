@@ -75,6 +75,10 @@ jobs:
         working-directory: pipeline
         continue-on-error: true
         run: uv run python -m sideboard_sage_pipeline main-eval
+      - name: Re-run the 14-day share forecast test on the last 6 closed months (Issue #281; appends to data/answers_scoreboard.json, ships nothing)
+        working-directory: pipeline
+        continue-on-error: true
+        run: uv run python -m sideboard_sage_pipeline share-forecast-eval --weekly
       - name: Write this week's analyst column when a finding passes the gates (Issue #183; nothing in a quiet week)
         id: column
         continue-on-error: true
