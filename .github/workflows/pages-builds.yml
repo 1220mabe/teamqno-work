@@ -1,7 +1,8 @@
 name: Pages builds
 
-# Alarm for the Cloudflare Pages limit of 500 builds a month (Issue #212). Every successful CI run uploads one
-# deployment, so this counts this month's successful CI runs through the runs API. From 80 percent (400) it fails
+# Alarm for the Cloudflare Pages limit of 500 builds a month (Issue #212). A CI run uploads a deployment only when its
+# `deploy` job succeeded (a run with no data change skips it, Issue #310), so this counts this month's CI runs whose
+# `deploy` job concluded success (whatever the run's own result), through the runs and jobs API. From 80 percent (400) it fails
 # loudly and posts to Discord; the failed run is the alert. It never writes anything. Stop adding schedules or
 # `make deploy` runs when it fires.
 on:
@@ -19,7 +20,7 @@ concurrency:
 jobs:
   count:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Count this month's deployments
         env:
@@ -28,7 +29,11 @@ jobs:
           LIMIT: ${{ vars.PAGES_BUILD_LIMIT || '500' }}
         run: |
           since=$(date -u +%Y-%m-01)
-          n=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?status=success&created=>=$since&per_page=100" --jq '.workflow_runs | length' | awk '{s+=$1} END {print s+0}')
+          n=0
+          for id in $(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?created=>=$since&per_page=100" --jq '.workflow_runs[].id'); do
+            d=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?per_page=100" --jq '[.jobs[] | select(.name == "deploy" and .conclusion == "success")] | length' | awk '{s+=$1} END {print s+0}')
+            n=$((n + d))
+          done
           pct=$((n * 100 / LIMIT))
           msg="Cloudflare Pages builds this month: $n of $LIMIT ($pct percent)."
           echo "$msg"

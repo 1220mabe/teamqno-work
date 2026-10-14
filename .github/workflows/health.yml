@@ -44,7 +44,7 @@ jobs:
               m = json.load(open(f"m-{f}.json"))
               age = now - datetime.fromisoformat(m["generated_at"])
               print(f, "decks", m["decks"], "age", age)
-              if age > timedelta(hours=14):  # refreshed every 4 hours; three missed runs is the alarm
+              if age > timedelta(hours=14):  # checked every 2 hours, deployed at least every 8 (Issue #310); 14 hours is the alarm
                   problems.append(f"{f} data is {age} old")
               if m["decks"] < 150:
                   problems.append(f"{f} has only {m['decks']} decks")

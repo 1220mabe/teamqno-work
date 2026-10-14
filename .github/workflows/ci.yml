@@ -5,7 +5,7 @@ name: CI
 # nobody else can reach a secret. Source of truth: runner/ in the private repo (scripts/publish-runner.sh copies it).
 on:
   schedule:
-    - cron: "20 */4 * * *" # the runner repo is public, so minutes are free: refresh every 4 hours
+    - cron: "20 */2 * * *" # the runner repo is public, so minutes are free: check every 2 hours, deploy only when worth it (deploy-check)
   workflow_dispatch:
     inputs:
       post:
@@ -286,6 +286,8 @@ jobs:
     needs: [ref]
     if: ${{ vars.DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
+    outputs:
+      deploy: ${{ steps.decide.outputs.deploy }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -382,6 +384,18 @@ jobs:
         with:
           path: pipeline/gate.txt
           key: ${{ steps.gate.outputs.key }}
+      # Cloudflare Pages allows 500 deploys a month (Issue #310): a scheduled run deploys only for new code, a big event the
+      # live site lacks, changed data once the live build is 3.5 hours old, or an 8-hour-old live build
+      # (pipeline deploy_check.py). A manual run always deploys. An unreadable live status means deploy.
+      - name: Deploy or skip
+        id: decide
+        working-directory: pipeline
+        env:
+          SHA: ${{ needs.ref.outputs.sha }}
+          SCHEDULED: ${{ github.event_name == 'schedule' && '--scheduled' || '' }}
+        run: |
+          curl -fsS --max-time 20 --retry 2 "https://sideboard-sage.pages.dev/api/v1/status.json" -o live-status.json || rm -f live-status.json
+          uv run python -m sideboard_sage_pipeline deploy-check --live live-status.json --commit "$SHA" $SCHEDULED --github-output "$GITHUB_OUTPUT" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Keep the built data for UI-only deploys
         if: ${{ steps.mode.outputs.build == 'true' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -401,7 +415,7 @@ jobs:
   # The pages are written while the browser tests run, so the deploy only uploads (about a minute off the critical path).
   pages:
     needs: [ref, site, data]
-    if: ${{ !cancelled() && needs.site.result == 'success' && needs.data.result == 'success' && vars.DEPLOY_ENABLED == 'true' }}
+    if: ${{ !cancelled() && needs.site.result == 'success' && needs.data.result == 'success' && needs.data.outputs.deploy == 'true' && vars.DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -474,7 +488,8 @@ jobs:
       cancel-in-progress: false
     needs: [ref, web-unit, sync-unit, sync-e2e, site, web-e2e, pipeline, data, mark, pages]
     # A commit that was already tested skips the test jobs (they count as skipped, not failed).
-    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && vars.DEPLOY_ENABLED == 'true' }}
+    # A run whose data did not change skips `pages`, and with it this job (Issue #310).
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && needs.pages.result == 'success' && vars.DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
