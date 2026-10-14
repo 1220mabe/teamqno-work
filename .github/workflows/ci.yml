@@ -505,7 +505,8 @@ jobs:
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           package_json_file: repo/apps/web/package.json
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      # No pull request or fork triggers here: only this repository's own runs write the cache.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7 # zizmor: ignore[cache-poisoning]
         with:
           node-version: 24
           cache: pnpm
@@ -517,6 +518,8 @@ jobs:
       - name: Save the live tournament indexes
         if: ${{ github.event_name == 'schedule' || inputs.post }}
         continue-on-error: true
+        env:
+          CATCHUP_DAYS: ${{ inputs.catchup_days }}
         run: |
           mkdir -p prev-indexes
           for dir in out/api/v1/tournaments/*/; do
@@ -525,7 +528,7 @@ jobs:
           done
           # Catch-up after a halt: forget the newest days, so those tournaments count as new. The announce cap still
           # applies and the X and social ledgers skip anything already posted.
-          days="${{ inputs.catchup_days }}"
+          days="$CATCHUP_DAYS"
           case "$days" in 1|2) cutoff=$(date -u -d "$((days - 1)) days ago" +%F)
             for f in prev-indexes/*.json; do [ -f "$f" ] && jq --arg c "$cutoff" 'if .events then .events |= map(select(.date < $c)) else . end' "$f" > "$f.tmp" && mv "$f.tmp" "$f"; done
             # The news index is left alone: reports are announced by their own rule.

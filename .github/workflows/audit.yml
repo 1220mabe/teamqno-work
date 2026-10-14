@@ -1,77 +1,122 @@
-name: Dependency audit
+name: Security check
 
-# Weekly: asks the package registries whether any dependency we ship has a known high or critical vulnerability and
-# sends a Discord message when it does (the runner repo is public, so no Issue).
+# Weekly, and on demand: known vulnerabilities in the web, Worker and pipeline dependencies, a secret scan of the tree
+# and of the week's commits, the live security headers, the certificate, the domain (expiry, nameservers, transfer lock),
+# and the workflows (permissions, pinning, script injection). It needs no secret but the Discord webhook. Each finding
+# is one stable line with no source text in it (this repo is public); the set of lines is remembered in the Actions
+# cache, so Discord hears about a set once, and again once a month while it stays (docs/SECURITY.md, "Weekly security check").
 on:
   schedule:
     - cron: "40 4 * * 1"
   workflow_dispatch:
+    inputs:
+      full_history:
+        description: "Scan every commit for secrets, not only the last 8 days"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
-  audit:
+  security:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: 1220mabe/sideboard-sage
           ssh-key: ${{ secrets.SOURCE_KEY }}
           persist-credentials: false
+          fetch-depth: 0
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           package_json_file: apps/web/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
-      - name: Web dependencies
-        id: web
-        working-directory: apps/web
-        continue-on-error: true
-        run: pnpm audit --prod --audit-level=high 2>&1 | tee ../../web-audit.txt
-      # The accounts Worker has its own lockfile; it ships to Cloudflare, so it is audited in full.
-      - name: Accounts Worker dependencies
-        id: sync
-        working-directory: apps/sync
-        continue-on-error: true
-        run: pnpm audit --audit-level=high 2>&1 | tee ../../sync-audit.txt
-      - name: Pipeline dependencies
-        id: py
-        working-directory: pipeline
+      # Each step writes finding lines to its own file and prints only those lines (package names, rule names, paths).
+      - name: Dependencies with a known high or critical vulnerability
         continue-on-error: true
         run: |
-          uv export --no-dev --no-hashes -o ../requirements-audit.txt >/dev/null 2>&1
-          uvx pip-audit -r ../requirements-audit.txt --progress-spinner off 2>&1 | tee ../py-audit.txt
+          : > f-deps.txt
+          # A registry that does not answer is a warning in the log, not a finding (it would alert on every outage).
+          npm_audit() { # <dir> <label> <extra flags>
+            (cd "$1" && pnpm audit --audit-level=high --json $3 > ../../audit-$2.json 2>/dev/null) || true
+            jq -e '.metadata' "audit-$2.json" >/dev/null 2>&1 || { echo "::warning::pnpm audit ($2) gave no answer"; return; }
+            jq -r --arg l "$2" '.advisories[]? | select(.severity == "high" or .severity == "critical") | "dependency: \($l) \(.module_name) (\(.severity))"' "audit-$2.json" >> f-deps.txt
+          }
+          npm_audit apps/web web --prod
+          # The accounts Worker ships to Cloudflare as a whole, so all of its packages count.
+          npm_audit apps/sync sync ""
+          (cd pipeline && uv export --no-dev --no-hashes -o ../requirements-audit.txt >/dev/null 2>&1)
+          uvx pip-audit@2.10.1 -r requirements-audit.txt --progress-spinner off --format json > audit-py.json 2>/dev/null || true
+          if jq -e '.dependencies' audit-py.json >/dev/null 2>&1; then
+            jq -r '.dependencies[] | select((.vulns // []) | length > 0) | "dependency: pipeline \(.name)"' audit-py.json >> f-deps.txt
+          else echo "::warning::pip-audit gave no answer"; fi
+          sort -u -o f-deps.txt f-deps.txt
+          cat f-deps.txt
+      - name: Workflow audit (zizmor, medium and above)
+        continue-on-error: true
+        run: |
+          uvx zizmor@1.30.1 --offline --min-severity medium --format json runner/*.yml 2>/dev/null \
+            | jq -r '.[]? | "workflow: zizmor \(.ident)"' | sort -u > f-zizmor.txt || true
+          cat f-zizmor.txt
+      - name: Secrets, headers, certificate, domain and workflow pinning
+        continue-on-error: true
+        env:
+          SINCE: ${{ inputs.full_history && 'all' || '8 days' }}
+        run: node apps/web/scripts/security-check.mjs --since "$SINCE" --out f-check.txt --dry-run || echo "::warning::security-check.mjs stopped early"
       # Runtime drift (Issue #100): a newer major of Next.js, React or the Node LTS line than the one we ship is a
-      # reminder, not a failure. Reads the registries only; about 5 seconds.
+      # reminder in the same message, not a vulnerability. Reads the registries only; about 5 seconds.
       - name: Runtime and framework majors
-        id: drift
+        continue-on-error: true
         working-directory: apps/web
         run: |
-          : > ../../drift.txt
+          : > ../../f-drift.txt
           for pkg in next react tailwindcss; do
             have=$(jq -r --arg p "$pkg" '(.dependencies[$p] // .devDependencies[$p] // "") | ltrimstr("^") | ltrimstr("~") | split(".")[0]' package.json)
             [ -n "$have" ] || continue
             latest=$(curl -fsS --max-time 15 "https://registry.npmjs.org/$pkg/latest" | jq -r '.version | split(".")[0]') || continue
-            [ "$have" = "$latest" ] || echo "$pkg $have -> $latest" >> ../../drift.txt
+            [ "$have" = "$latest" ] || echo "upgrade: $pkg $have -> $latest (docs/OPERATIONS.md quarterly checklist)" >> ../../f-drift.txt
           done
           ci_node=$(grep -m1 'node-version:' ../../runner/ci.yml 2>/dev/null | grep -o '[0-9]*' || true)
           lts=$(curl -fsS --max-time 15 https://nodejs.org/dist/index.json | jq -r '[.[] | select(.lts != false)][0].version | ltrimstr("v") | split(".")[0]') || lts=""
-          [ -n "$lts" ] && [ -n "$ci_node" ] && [ "$ci_node" != "$lts" ] && echo "node $ci_node -> LTS $lts" >> ../../drift.txt || true
-          cat ../../drift.txt
-      - name: Tell Discord when something was found
-        if: steps.web.outcome == 'failure' || steps.sync.outcome == 'failure' || steps.py.outcome == 'failure'
+          if [ -n "$lts" ] && [ -n "$ci_node" ] && [ "$ci_node" != "$lts" ]; then echo "upgrade: node $ci_node -> LTS $lts" >> ../../f-drift.txt; fi
+          cat ../../f-drift.txt
+      - name: Collect
+        id: collect
+        run: |
+          cat f-deps.txt f-zizmor.txt f-check.txt f-drift.txt 2>/dev/null | sed '/^$/d' | sort -u > findings.txt
+          n=$(wc -l < findings.txt | tr -d ' ')
+          echo "count=$n" >> "$GITHUB_OUTPUT"
+          # Same lines, same month: same key. A new or changed finding, or a new month, gets a new key.
+          echo "key=security-alerted-$(sha256sum findings.txt | cut -c1-16)-$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+          echo "$n finding(s)"
+      - name: Already reported?
+        id: seen
+        if: steps.collect.outputs.count != '0'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: findings.txt
+          key: ${{ steps.collect.outputs.key }}
+          lookup-only: true
+      - name: Tell Discord
+        id: tell
+        if: steps.collect.outputs.count != '0' && steps.seen.outputs.cache-hit != 'true'
         env:
           HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          [ -n "$HOOK" ] || exit 0
-          MSG="The weekly dependency audit found known vulnerabilities. Update the packages (a major bump needs a look). Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
-      - name: Tell Discord about newer majors
-        if: always() && hashFiles('drift.txt') != ''
-        env:
-          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: |
-          [ -n "$HOOK" ] && [ -s drift.txt ] || exit 0
-          MSG="Newer major versions exist (plan the upgrade, docs/OPERATIONS.md quarterly checklist): $(tr '\n' ';' < drift.txt | head -c 600)"
-          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
+          if [ -z "$HOOK" ]; then echo "no webhook: failing the run so GitHub emails the owner"; exit 1; fi
+          MSG="Weekly security check: $(wc -l < findings.txt | tr -d ' ') item(s) (fix guide: docs/SECURITY.md, Weekly security check).
+          $(head -c 1500 findings.txt | sed 's/^/- /')
+          Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK"
+      - name: Remember that this set was reported
+        if: steps.tell.outcome == 'success'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: findings.txt
+          key: ${{ steps.collect.outputs.key }}
