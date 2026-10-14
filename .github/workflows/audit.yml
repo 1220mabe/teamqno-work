@@ -101,11 +101,14 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: findings.txt
-          key: ${{ steps.collect.outputs.key }}
+          # Every run with findings saves a fresh entry (below), so the match never depends on a week-old entry surviving
+          # the cache's 7-day eviction.
+          key: ${{ steps.collect.outputs.key }}-${{ github.run_id }}
+          restore-keys: ${{ steps.collect.outputs.key }}
           lookup-only: true
       - name: Tell Discord
         id: tell
-        if: steps.collect.outputs.count != '0' && steps.seen.outputs.cache-hit != 'true'
+        if: steps.collect.outputs.count != '0' && steps.seen.outputs.cache-matched-key == ''
         env:
           HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
@@ -115,8 +118,8 @@ jobs:
           Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK"
       - name: Remember that this set was reported
-        if: steps.tell.outcome == 'success'
+        if: steps.collect.outputs.count != '0' && steps.tell.outcome != 'failure'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: findings.txt
-          key: ${{ steps.collect.outputs.key }}
+          key: ${{ steps.collect.outputs.key }}-${{ github.run_id }}
