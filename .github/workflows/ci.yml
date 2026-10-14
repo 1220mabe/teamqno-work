@@ -20,6 +20,10 @@ on:
         description: "1 = treat today's tournaments as new, 2 = yesterday's and today's (to announce what a halt skipped; the ledgers stop repeats)"
         type: string
         default: "0"
+      force_quarantine:
+        description: "Test the quarantine: treat this run's data as failing the data gate (ships the last good data, alerts Discord)"
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -310,15 +314,15 @@ jobs:
           restore-keys: |
             pipeline-data-${{ steps.day.outputs.d }}-
             pipeline-data-
-      # A UI-only deploy reuses the last built data (cuts about 3 minutes); no cached copy means a normal build.
-      - name: Reuse the last built data
+      # A UI-only deploy reuses the last good data (cuts about 3 minutes); no cached copy means a normal build.
+      - name: Reuse the last good data
         id: api
         if: ${{ inputs.reuse_data == true }}
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: apps/web/public/api
-          key: api-built-none
-          restore-keys: api-built-
+          key: api-good-none
+          restore-keys: api-good-
       - id: mode
         run: echo "build=${{ inputs.reuse_data == true && steps.api.outputs.cache-matched-key != '' && 'false' || 'true' }}" >> "$GITHUB_OUTPUT"
       - name: Build the static API (cards from Scryfall, tournaments from MTGO, TopDeck.gg and Spicerack)
@@ -346,21 +350,43 @@ jobs:
           # Pictures for list cards in no format's card file (a set newer than the bulk file), via /cards/collection;
           # only asks when something is missing, and a failure only means card backs in the share images (Issue #249).
           uv run python -m sideboard_sage_pipeline unlisted-art || echo "unlisted art: skipped"
-      # Pre-publish gate (#135), report-only until it has run clean on real data for a while: a failed check alerts Discord but does not
-      # stop the deploy (a false positive must never wedge a deploy). To make it blocking, add `[ "$rc" -eq 1 ] && exit 1` after the alert.
+      # Pre-publish gate (#135) with quarantine: data that fails it (exit 1) is not published. The run ships its code with the
+      # last good data (the newest `api-good-` copy, saved below only after a pass) and still ends green, so nothing wedges.
+      # With no copy, or one the code cannot read (pipeline quarantine.py), this run's data ships as before and the alert says so.
       # The problems (counts and names only, no source) go to Discord when the webhook is set.
       # The same findings alert once a day at most (#174): the key is a hash of the findings plus the date, kept in the Actions cache.
       - name: Data gate
         id: gate
         if: ${{ steps.mode.outputs.build == 'true' }}
         working-directory: pipeline
+        env:
+          FORCE: ${{ inputs.force_quarantine == true }}
         run: |
           # Exit 1 = a data problem, 2 = only late or disagreeing sources (alert, never block: the other sources' data ships).
           rc=0
           uv run python -m sideboard_sage_pipeline gate > gate.txt || rc=$?
+          if [ "$FORCE" = true ]; then echo "gate: forced problem (force_quarantine test run)" >> gate.txt; rc=1; fi
           cat gate.txt
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
           echo "key=gate-alert-$(date -u +%F)-$(sed -E 's/[0-9]+:[0-9]+//g' gate.txt | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      # Quarantine: this run's folder goes aside, the last good copy comes back in its place (a cache restores only to the
+      # path it was saved from), and `quarantine` keeps it or puts this run's folder back. Before "Deploy or skip", which
+      # stamps this run's commit into whichever status.json ships.
+      - name: Set this run's data aside
+        if: steps.gate.outputs.rc == '1'
+        run: mv apps/web/public/api apps/web/public/api.fresh
+      - name: Restore the last good data
+        if: steps.gate.outputs.rc == '1'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: apps/web/public/api
+          key: api-good-none
+          restore-keys: api-good-
+      - name: Quarantine
+        id: quarantine
+        if: steps.gate.outputs.rc == '1'
+        working-directory: pipeline
+        run: set -o pipefail; uv run python -m sideboard_sage_pipeline quarantine --fresh ../apps/web/public/api.fresh --last-good ../apps/web/public/api --github-output "$GITHUB_OUTPUT" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Data gate seen today
         if: steps.gate.outputs.rc != '' && steps.gate.outputs.rc != '0'
         id: gate-seen
@@ -375,8 +401,19 @@ jobs:
         env:
           HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RC: ${{ steps.gate.outputs.rc }}
+          HELD: ${{ steps.quarantine.outputs.quarantined }}
+          DATA_FROM: ${{ steps.quarantine.outputs.data_from }}
+          REASON: ${{ steps.quarantine.outputs.reason }}
         run: |
-          MSG="Data gate warning (report only, deploy continues): $RUN"$'\n'"$(head -c 1500 gate.txt)"
+          if [ "$RC" = 1 ] && [ "$HELD" = true ]; then
+            HEAD="Data quarantined: this run's data failed the gate, so the site keeps the last good data (built $DATA_FROM) with this run's code"
+          elif [ "$RC" = 1 ]; then
+            HEAD="Data gate problem, not quarantined (${REASON:-quarantine did not run}): this run's data ships as before"
+          else
+            HEAD="Data gate warning (sources only, the data ships)"
+          fi
+          MSG="$HEAD: $RUN"$'\n'"$(head -c 1500 gate.txt)"
           [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
       - name: Data gate remember
         if: steps.gate.outputs.rc != '' && steps.gate.outputs.rc != '0' && steps.gate-seen.outputs.cache-hit != 'true'
@@ -396,12 +433,15 @@ jobs:
         run: |
           curl -fsS --max-time 20 --retry 2 "https://sideboard-sage.pages.dev/api/v1/status.json" -o live-status.json || rm -f live-status.json
           uv run python -m sideboard_sage_pipeline deploy-check --live live-status.json --commit "$SHA" $SCHEDULED --github-output "$GITHUB_OUTPUT" | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Keep the built data for UI-only deploys
-        if: ${{ steps.mode.outputs.build == 'true' }}
+      # The last good data, for a later quarantine and for UI-only deploys: saved only when the gate passed (exit 0 or 2).
+      # actions/cache rather than an artifact: no extra token, restores by prefix, and a copy refreshed every 2 hours never
+      # meets the 7-day eviction. A new prefix (not `api-built-`), so a copy saved before the gate decided is never trusted.
+      - name: Keep the last good data
+        if: ${{ steps.mode.outputs.build == 'true' && steps.gate.outputs.rc != '1' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: apps/web/public/api
-          key: api-built-${{ github.run_id }}
+          key: api-good-${{ github.run_id }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: api
