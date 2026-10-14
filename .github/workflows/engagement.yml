@@ -64,6 +64,8 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           ENGAGEMENT_BSKY_HANDLE: ${{ vars.ENGAGEMENT_BSKY_HANDLE }}
           ENGAGEMENT_MASTODON: ${{ vars.ENGAGEMENT_MASTODON }}
+          CF_ANALYTICS_TOKEN: ${{ secrets.CF_ANALYTICS_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: pnpm rollup
       - name: Shop link check (our own outgoing shop links, once a day; Discord once per change)
         continue-on-error: true
