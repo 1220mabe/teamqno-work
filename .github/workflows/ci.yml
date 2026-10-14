@@ -487,6 +487,7 @@ jobs:
       X_DAILY_CAP: ${{ vars.X_DAILY_CAP }}
       BUFFER_POSTING: ${{ vars.BUFFER_POSTING }}
       BUFFER_DAILY_CAP: ${{ vars.BUFFER_DAILY_CAP }}
+      BUFFER_X_PER_DAY: ${{ vars.BUFFER_X_PER_DAY }}
       BUFFER_MONTHLY_CAP: ${{ vars.BUFFER_MONTHLY_CAP }}
       BUFFER_LEAGUE_RESERVE: ${{ vars.BUFFER_LEAGUE_RESERVE }}
     steps:
@@ -664,6 +665,8 @@ jobs:
           THREADS_TOKEN: ${{ secrets.THREADS_TOKEN }}
           INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
           THREADS_DAILY_CAP: ${{ vars.THREADS_DAILY_CAP }}
+          BSKY_DAILY_CAP: ${{ vars.BSKY_DAILY_CAP }}
+          MASTODON_DAILY_CAP: ${{ vars.MASTODON_DAILY_CAP }}
           INSTAGRAM_DAILY_CAP: ${{ vars.INSTAGRAM_DAILY_CAP }}
         run: pnpm social-post --data "$GITHUB_WORKSPACE/out/api/v1" --previous "$GITHUB_WORKSPACE/prev-indexes" --ledger "$GITHUB_WORKSPACE/social-ledger/ledger.json"
       - name: Save social ledger
