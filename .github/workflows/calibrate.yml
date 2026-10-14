@@ -155,13 +155,18 @@ jobs:
           [ -n "$HOOK" ] || exit 0
           MSG=$(head -c 1900 "$RUNNER_TEMP/sources.txt")
           curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
+      - name: Partner value report (each partner's closed months, written once; Issue #313)
+        # Only rows of data/sources.yaml with a partner block; a removed block deletes data/partners/<id>.
+        continue-on-error: true
+        working-directory: pipeline
+        run: uv run python -m sideboard_sage_pipeline partner-report >> "$GITHUB_STEP_SUMMARY"
       - name: Commit new history and the calibration when they changed
         env:
           SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
         run: |
           git config user.name "calibration-bot"
           git config user.email "calibration-bot@users.noreply.github.com"
-          git add -A history data/calibration.json data/sns_findings.json data/board_eval.json data/main_eval.json data/archetypes $(ls -d data/models data/answers_scoreboard.json data/names_coverage.json data/sources_candidates.json 2>/dev/null)
+          git add -A history data/calibration.json data/sns_findings.json data/board_eval.json data/main_eval.json data/archetypes $(ls -d data/models data/answers_scoreboard.json data/names_coverage.json data/sources_candidates.json data/partners 2>/dev/null)
           # The analyst column, only when it survived the checks above (its files are gone otherwise).
           git add -A apps/web/content/articles apps/web/public/media
           if ! git diff --cached --quiet; then
