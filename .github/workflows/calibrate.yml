@@ -143,13 +143,25 @@ jobs:
           [ -n "$HOOK" ] || exit 0
           MSG="New archetype names to review: $new. Promote one with: python -m sideboard_sage_pipeline promote-name --format <Format> --name \"<name>\" [--as \"<name players say>\"]"
           curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
+      - name: Permission watch (big events we cannot use, ledger status, drafts waiting; Issue #313)
+        # Reads only permitted sources (data/sources.yaml). Drafts are written on the owner's machine, never here.
+        continue-on-error: true
+        working-directory: pipeline
+        env:
+          TOPDECK_API_KEY: ${{ secrets.TOPDECK_API_KEY }}
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          uv run python -m sideboard_sage_pipeline sources-watch --discord "$RUNNER_TEMP/sources.txt" >> "$GITHUB_STEP_SUMMARY"
+          [ -n "$HOOK" ] || exit 0
+          MSG=$(head -c 1900 "$RUNNER_TEMP/sources.txt")
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
       - name: Commit new history and the calibration when they changed
         env:
           SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
         run: |
           git config user.name "calibration-bot"
           git config user.email "calibration-bot@users.noreply.github.com"
-          git add -A history data/calibration.json data/sns_findings.json data/board_eval.json data/main_eval.json data/archetypes $(ls -d data/models data/answers_scoreboard.json data/names_coverage.json 2>/dev/null)
+          git add -A history data/calibration.json data/sns_findings.json data/board_eval.json data/main_eval.json data/archetypes $(ls -d data/models data/answers_scoreboard.json data/names_coverage.json data/sources_candidates.json 2>/dev/null)
           # The analyst column, only when it survived the checks above (its files are gone otherwise).
           git add -A apps/web/content/articles apps/web/public/media
           if ! git diff --cached --quiet; then
