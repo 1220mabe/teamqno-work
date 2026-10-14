@@ -346,8 +346,6 @@ jobs:
           # Pictures for list cards in no format's card file (a set newer than the bulk file), via /cards/collection;
           # only asks when something is missing, and a failure only means card backs in the share images (Issue #249).
           uv run python -m sideboard_sage_pipeline unlisted-art || echo "unlisted art: skipped"
-          # Private partner report pages (Issue #313): moved to /partners/<key>/ by the pages job; none without a partner.
-          uv run python -m sideboard_sage_pipeline partner-pages || echo "partner pages: skipped"
       # Pre-publish gate (#135), report-only until it has run clean on real data for a while: a failed check alerts Discord but does not
       # stop the deploy (a false positive must never wedge a deploy). To make it blocking, add `[ "$rc" -eq 1 ] && exit 1` after the alert.
       # The problems (counts and names only, no source) go to Discord when the webhook is set.
@@ -473,9 +471,6 @@ jobs:
         continue-on-error: true
         working-directory: repo/apps/web
         run: pnpm matrix-image --site "$GITHUB_WORKSPACE/out"
-      # The partner pages ride in the api artifact (written by the data job) and are served at /partners/<key>/, never under /api/.
-      - name: Place the partner report pages
-        run: rm -rf out/partners && if [ -d out/api/_partners ]; then mv out/api/_partners out/partners; fi
       - name: Count the files (Cloudflare Pages allows 20,000)
         working-directory: repo/apps/web
         run: node scripts/budget.mjs --files --site "$GITHUB_WORKSPACE/out"
@@ -515,6 +510,7 @@ jobs:
         with:
           name: pages
           path: out
+      # pipeline and data/partners (with data/sources.yaml beside it) only for the partner pages below.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: 1220mabe/sideboard-sage
@@ -522,7 +518,25 @@ jobs:
           persist-credentials: false
           ref: ${{ needs.ref.outputs.sha }}
           path: repo
-          sparse-checkout: apps/web
+          sparse-checkout: |
+            apps/web
+            pipeline
+            data/partners
+      # Private partner report pages (Issue #313, /partners/<key>/): written here, after the last artifact upload and
+      # right before the Cloudflare upload, because artifacts of the public runner repo can be downloaded by anyone.
+      # The ledger decides: a removed partner block means no page in this deploy. Nothing is printed but a count.
+      - name: Any partners?
+        id: partners
+        run: echo "any=$(grep -qE '^ +partner:' repo/data/sources.yaml && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: ${{ steps.partners.outputs.any == 'true' }}
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: repo/pipeline/uv.lock
+      - name: Write the partner report pages
+        if: ${{ steps.partners.outputs.any == 'true' }}
+        working-directory: repo/pipeline
+        run: uv run --locked python -m sideboard_sage_pipeline partner-pages --out "$GITHUB_WORKSPACE/out/partners"
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           package_json_file: repo/apps/web/package.json
