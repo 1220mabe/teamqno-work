@@ -51,7 +51,7 @@ jobs:
           npm_audit apps/web web --prod
           # The accounts Worker ships to Cloudflare as a whole, so all of its packages count.
           npm_audit apps/sync sync ""
-          (cd pipeline && uv export --no-dev --no-hashes -o ../requirements-audit.txt >/dev/null 2>&1)
+          (cd pipeline && uv export --no-dev --no-hashes --no-emit-project -o ../requirements-audit.txt >/dev/null 2>&1)
           uvx pip-audit@2.10.1 -r requirements-audit.txt --progress-spinner off --format json > audit-py.json 2>/dev/null || true
           if jq -e '.dependencies' audit-py.json >/dev/null 2>&1; then
             jq -r '.dependencies[] | select((.vulns // []) | length > 0) | "dependency: pipeline \(.name)"' audit-py.json >> f-deps.txt
