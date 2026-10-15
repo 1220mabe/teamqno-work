@@ -14,6 +14,7 @@ jobs:
   site:
     if: vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check the pages, every format's data, and how fresh it is
         run: |
@@ -142,4 +143,49 @@ jobs:
         run: |
           [ -n "$HOOK" ] || exit 0
           MSG="Health check failed: $(cat problems.txt 2>/dev/null | head -c 900 || echo 'the site or a data file could not be fetched'). Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
+
+  # Cloudflare API tokens may carry an expiry date (docs/RECOVERY.md, "Owner unavailable"); a lapsed one stops the
+  # deploy, the AI drafts, the visits rollup or the D1 backup. Once a day (the run before 06:00 UTC, or by hand) each
+  # token that is set is checked with Cloudflare's own verify call; one Discord message names any that expires within
+  # 30 days or is no longer active. No checkout and no third-party code run here, only curl and jq. A call that does
+  # not answer is a log warning, never a message.
+  tokens:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Cloudflare tokens near expiry
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          AI_ACCOUNT: ${{ secrets.CF_ACCOUNT_ID }}
+          T_CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          T_D1_BACKUP_TOKEN: ${{ secrets.D1_BACKUP_TOKEN }}
+          T_CF_AI_TOKEN: ${{ secrets.CF_AI_TOKEN }}
+          T_CF_ANALYTICS_TOKEN: ${{ secrets.CF_ANALYTICS_TOKEN }}
+        run: |
+          [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || [ "$(date -u +%H)" -lt 6 ] || exit 0
+          api=https://api.cloudflare.com/client/v4
+          soon=$(( $(date -u +%s) + 30 * 86400 ))
+          : > tokens.txt
+          for name in CLOUDFLARE_API_TOKEN D1_BACKUP_TOKEN CF_AI_TOKEN CF_ANALYTICS_TOKEN; do
+            var="T_$name"; tok="${!var}"
+            [ -n "$tok" ] || continue
+            # A user token answers the first call, an account-owned token the second.
+            r=$(curl -sS --max-time 15 -H "Authorization: Bearer $tok" "$api/user/tokens/verify" || true)
+            for acct in $ACCOUNT $AI_ACCOUNT; do
+              [ "$(jq -r '.success // false' <<<"$r" 2>/dev/null)" != true ] || break
+              r=$(curl -sS --max-time 15 -H "Authorization: Bearer $tok" "$api/accounts/$acct/tokens/verify" || true)
+            done
+            if ! jq -e 'has("success")' <<<"$r" >/dev/null 2>&1; then echo "::warning::$name: the verify call gave no answer"; continue; fi
+            status=$(jq -r 'if .success then (.result.status // "unknown") else "invalid" end' <<<"$r")
+            expires=$(jq -r '.result.expires_on // empty' <<<"$r")
+            echo "$name: $status, expires ${expires:-never}"
+            if [ "$status" != active ]; then echo "- $name is $status" >> tokens.txt
+            elif [ -n "$expires" ] && [ "$(date -u -d "$expires" +%s)" -lt "$soon" ]; then echo "- $name expires $expires" >> tokens.txt; fi
+          done
+          [ -s tokens.txt ] || exit 0
+          cat tokens.txt
+          [ -n "$HOOK" ] || { echo "::error::a Cloudflare token needs renewal and there is no webhook"; exit 1; }
+          MSG="Cloudflare token renewal (docs/DEPLOY.md, Runbook, \"Rotate the Cloudflare token\"; same steps for each secret named):"$'\n'"$(cat tokens.txt)"
           curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
