@@ -1,0 +1,24 @@
+name: Tax reminder
+
+# Twice a year (Dec 1 and Jan 15) a short Discord note reminds the owner to review revenue and expense records
+# for the tax return. It holds no data and no secret other than the Discord webhook.
+on:
+  schedule:
+    - cron: "0 9 1 12 *"
+    - cron: "0 9 15 1 *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Tell Discord
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          [ -n "$HOOK" ] || exit 0
+          MSG="Tax reminder: it is time to review the revenue and expense records for the tax return. See ~/OWNER-DASHBOARDS.md section 5b."
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true

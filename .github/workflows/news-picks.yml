@@ -73,9 +73,6 @@ jobs:
           gh run download "$run" --name api --dir api-data
       - name: Helper that commits data/ai, retrying on a moved main, and fails loudly
         if: ${{ steps.gate.outputs.skip != 'true' }}
-        env:
-          SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           cat > "$RUNNER_TEMP/persist.sh" <<'SH'
           #!/usr/bin/env bash
@@ -89,6 +86,7 @@ jobs:
           git diff --cached --quiet && exit 0
           umask 077
           printf '%s\n' "$SOURCE_WRITE_KEY" > "$RUNNER_TEMP/wkey"
+          trap 'rm -f "$RUNNER_TEMP/wkey"' EXIT
           # GitHub's published ed25519 host key, pinned instead of trusting the first answer.
           echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$RUNNER_TEMP/known_hosts"
           export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/wkey -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o StrictHostKeyChecking=yes"
@@ -119,11 +117,16 @@ jobs:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           AI_DRAFTING: ${{ vars.AI_DRAFTING }}
           AI_NEURON_CAP: ${{ vars.AI_NEURON_CAP }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: pnpm news-pick --bakeoff || true
+      # The write key reaches only the commit steps, which run no pnpm or node code, so no dependency can read it.
+      - name: Commit the model choice
+        if: ${{ env.BAKEOFF == 'true' }}
+        env:
           SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          pnpm news-pick --bakeoff || true
-          cd "$GITHUB_WORKSPACE" && "$RUNNER_TEMP/persist.sh" "data: draft model bake-off"
+          "$RUNNER_TEMP/persist.sh" "data: draft model bake-off"
       - name: Claim today's picks and commit the claim
         if: ${{ env.BAKEOFF != 'true' && steps.gate.outputs.skip != 'true' }}
         working-directory: apps/web
@@ -140,11 +143,16 @@ jobs:
           BUFFER_POSTING: ${{ vars.BUFFER_POSTING }}
           BUFFER_DAILY_CAP: ${{ vars.BUFFER_DAILY_CAP }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
         run: |
           lane=""; [ "$HOT_ONLY" = true ] && lane="--hot-only"
           pnpm news-pick --claim $lane --data "$GITHUB_WORKSPACE/api-data/v1" || true
-          cd "$GITHUB_WORKSPACE" && "$RUNNER_TEMP/persist.sh" "data: news-pick claim"
+      - name: Commit the claim
+        if: ${{ env.BAKEOFF != 'true' && steps.gate.outputs.skip != 'true' }}
+        env:
+          SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          "$RUNNER_TEMP/persist.sh" "data: news-pick claim"
       - name: Send the claimed posts, then commit the result
         if: ${{ env.BAKEOFF != 'true' && steps.gate.outputs.skip != 'true' }}
         working-directory: apps/web
@@ -158,8 +166,13 @@ jobs:
           NEWSPICK_DAILY_CAP: ${{ vars.NEWSPICK_DAILY_CAP }}
           NEWSPICK_HOT_DAILY_CAP: ${{ vars.NEWSPICK_HOT_DAILY_CAP }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
         run: |
           lane=""; [ "$HOT_ONLY" = true ] && lane="--hot-only"
           pnpm news-pick --send $lane || true
-          cd "$GITHUB_WORKSPACE" && "$RUNNER_TEMP/persist.sh" "data: news-pick result"
+      - name: Commit the result
+        if: ${{ env.BAKEOFF != 'true' && steps.gate.outputs.skip != 'true' }}
+        env:
+          SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          "$RUNNER_TEMP/persist.sh" "data: news-pick result"

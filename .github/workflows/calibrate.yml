@@ -175,6 +175,7 @@ jobs:
             # dependency install has run, and is deleted at the end.
             umask 077
             printf '%s\n' "$SOURCE_WRITE_KEY" > "$RUNNER_TEMP/wkey"
+            trap 'rm -f "$RUNNER_TEMP/wkey"' EXIT # the key never outlives this step, even on a failed push
             export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/wkey -o StrictHostKeyChecking=accept-new"
             REMOTE=git@github.com:1220mabe/sideboard-sage.git
             # A push to main during this long job (it runs over an hour) rejects ours: replay the one commit on the newest main and retry.
