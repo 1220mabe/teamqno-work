@@ -22,7 +22,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       SITE: https://teamqno.work
-      PAGES: "/ /decks/ /meta/ /me/ /tournaments/ /journal/"
+      PAGES: "/ /decks/ /meta/ /me/ /tournaments/ /journal/ /cards/"
     steps:
       - name: Previous numbers
         run: |
