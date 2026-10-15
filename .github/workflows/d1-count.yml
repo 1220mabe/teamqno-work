@@ -1,6 +1,6 @@
 name: D1 count
 
-# One number for the owner: how many accounts exist (#175), and the weekly buy-funnel line (#239: opens, shop clicks and
+# Numbers for the owner: how many accounts exist, how many signed up in the last 7 days and how many synced anything (#175), and the weekly buy-funnel line (#239: opens, shop clicks and
 # click rate per placement, shop clicks toward the stop rule; counts only, nothing about a visitor). Runs with the same
 # read token as the backup and prints only these numbers (no emails, no records) to the log and, when the webhook is
 # set, to Discord. Off until the owner sets
@@ -44,13 +44,16 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          out=$(npx --yes wrangler@4.146.0 d1 execute sideboard-sage-sync --remote --json --command "SELECT COUNT(*) AS n FROM users")
+          # created_at is milliseconds (Date.now() in the Worker); "activated" means the account synced at least one record.
+          out=$(npx --yes wrangler@4.146.0 d1 execute sideboard-sage-sync --remote --json --command "SELECT COUNT(*) AS n, COALESCE(SUM(created_at >= (CAST(strftime('%s','now') AS INTEGER) - 604800) * 1000), 0) AS week, COALESCE(SUM(records > 0), 0) AS active FROM users")
           n=$(printf '%s' "$out" | jq -r '.[0].results[0].n')
-          case "$n" in ''|*[!0-9]*) echo "no count"; exit 1;; esac
+          week=$(printf '%s' "$out" | jq -r '.[0].results[0].week')
+          active=$(printf '%s' "$out" | jq -r '.[0].results[0].active')
+          for v in "$n" "$week" "$active"; do case "$v" in ''|*[!0-9]*) echo "no count"; exit 1;; esac; done
           # Database size against the free 5 GB; from 3 GB the message says so (the limit stops writes, it never bills).
           size=$(printf '%s' "$out" | jq -r '.[0].meta.size_after // 0')
           mb=$((size / 1048576))
-          msg="Accounts: $n. Database: $mb MB of 5000."
+          msg="Accounts: $n ($week new in the last 7 days, $active activated: at least one synced record). Database: $mb MB of 5000."
           [ "$mb" -ge 3000 ] && msg="$msg Over 3 GB: lower the per-account caps or prune (docs/DEPLOY.md, Growth limits)."
           echo "$msg"
           [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c}')" "$HOOK" || true
