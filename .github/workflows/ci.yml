@@ -24,6 +24,10 @@ on:
         description: "Test the quarantine: treat this run's data as failing the data gate (ships the last good data, alerts Discord)"
         type: boolean
         default: false
+      force_fallback:
+        description: "Rehearse the fallback path: build the last tested commit with fresh data as if main failed, then deploy nothing and post nothing"
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -33,7 +37,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Which commit this run is about (the newest of the source repo's main) and whether its tests already passed.
+  # Which commit this run is about (the newest of the source repo's main), whether its tests already passed, and the
+  # newest earlier commit of main that passed them (the fallback the `verdict` job ships when this one fails).
   ref:
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -42,6 +47,7 @@ jobs:
     outputs:
       sha: ${{ steps.out.outputs.sha }}
       tested: ${{ steps.out.outputs.tested }}
+      fallback: ${{ steps.out.outputs.fallback }}
       discord: ${{ steps.flags.outputs.discord }}
       x: ${{ steps.flags.outputs.x }}
       buffer: ${{ steps.flags.outputs.buffer }}
@@ -76,25 +82,42 @@ jobs:
           ssh-key: ${{ secrets.SOURCE_KEY }}
           ref: main
           sparse-checkout: Makefile
+          # Recent history (commits and trees only), so the fallback below can be checked to be an ancestor of main.
+          fetch-depth: 200
+          filter: blob:none
           persist-credentials: false
       - id: sha
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       # A commit is tested once: the cache key is saved by the `mark` job after every test passed. Later runs of the same
-      # commit only refresh the data and deploy.
+      # commit only refresh the data and deploy. Only an exact match counts as tested (cache-hit); the prefix match is the
+      # most recently saved `tested-` key, the newest commit that passed. A real restore (not lookup-only) of the tiny
+      # file keeps that entry in use, so a long-failing main does not let the 7-day eviction drop its fallback.
       - id: tested
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .tested
           key: tested-${{ steps.sha.outputs.sha }}
-          lookup-only: true
+          restore-keys: tested-
       - id: out
         env:
           SHA: ${{ steps.sha.outputs.sha }}
           HIT: ${{ steps.tested.outputs.cache-hit }}
+          MATCHED: ${{ steps.tested.outputs.cache-matched-key }}
+          # A commit outside the fetched history is "not an ancestor", never a fetch (the key is gone by now anyway).
+          GIT_NO_LAZY_FETCH: "1"
         run: |
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           [ "$HIT" = "true" ] && echo "tested=true" >> "$GITHUB_OUTPUT" || echo "tested=false" >> "$GITHUB_OUTPUT"
-          echo "commit $SHA tested=$HIT"
+          # The fallback must be a full sha and this commit (tested: only a force_fallback rehearsal uses it) or an
+          # ancestor of it (still on main after a force-push or a revert, within the fetched history). Anything else
+          # means no fallback: a failing main then ships nothing.
+          fallback=""
+          cand="${MATCHED#tested-}"
+          if [[ "$cand" =~ ^[0-9a-f]{40}$ ]] && { [ "$cand" = "$SHA" ] || git merge-base --is-ancestor "$cand" "$SHA" 2>/dev/null; }; then
+            fallback="$cand"
+          fi
+          echo "fallback=$fallback" >> "$GITHUB_OUTPUT"
+          echo "commit $SHA tested=$HIT fallback=${fallback:-none}"
   # Fast checks, in parallel with the browser tests below.
   web-unit:
     needs: [ref]
@@ -175,20 +198,24 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec playwright test -c playwright.sync.config.ts
 
-  # Build the static site once: the browser tests and the deploy both use this exact output.
+  # Build the static site of the newest commit once: the browser tests and the deploy both use this exact output.
+  # `site-fallback` runs the same steps (YAML anchor) for the fallback commit; COMMIT and SITE_ARTIFACT tell them apart.
   site:
     needs: [ref]
     runs-on: ubuntu-latest
+    env:
+      COMMIT: ${{ needs.ref.outputs.sha }}
+      SITE_ARTIFACT: site
     defaults:
       run:
         working-directory: apps/web
-    steps:
+    steps: &site-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: 1220mabe/sideboard-sage
           ssh-key: ${{ secrets.SOURCE_KEY }}
           persist-credentials: false
-          ref: ${{ needs.ref.outputs.sha }}
+          ref: ${{ env.COMMIT }}
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           package_json_file: apps/web/package.json
@@ -211,7 +238,7 @@ jobs:
           NEXT_PUBLIC_SW_OFF: ${{ vars.SW_OFF }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: site
+          name: ${{ env.SITE_ARTIFACT }}
           path: apps/web/out
           retention-days: 1
           compression-level: 1
@@ -285,20 +312,75 @@ jobs:
           [ -f data/cards.sqlite ] || uv run python -m sideboard_sage_pipeline cards || { echo "::warning::backtest gate skipped: no card data"; exit 0; }
           uv run python -m sideboard_sage_pipeline backtest-gate
 
-  # The data files, built in parallel with the tests (they do not depend on each other).
+  # The one gate: which commit this run deploys, and by which path. `head`: the newest commit, when it was tested before
+  # or every test job above passed now (exactly `success`: a skipped or cancelled test is not a pass). `fallback`: the
+  # newest earlier commit that passed (`ref`), rebuilt by the *-fallback jobs, so a failing main still refreshes the
+  # data with tested code. Neither: nothing deploys. A new test job must be added to `needs` and to the check below.
+  # force_fallback (manual) takes the fallback path as a rehearsal: everything is built, nothing is uploaded or posted.
+  verdict:
+    needs: [ref, web-unit, sync-unit, sync-e2e, web-e2e, pipeline]
+    if: ${{ !cancelled() && needs.ref.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      ship: ${{ steps.pick.outputs.ship }}
+      via: ${{ steps.pick.outputs.via }}
+      passed: ${{ steps.pick.outputs.passed }}
+      rehearsal: ${{ steps.pick.outputs.rehearsal }}
+    steps:
+      - id: pick
+        env:
+          SHA: ${{ needs.ref.outputs.sha }}
+          TESTED: ${{ needs.ref.outputs.tested }}
+          FALLBACK: ${{ needs.ref.outputs.fallback }}
+          FORCE: ${{ inputs.force_fallback == true }}
+          RESULTS: ${{ needs.web-unit.result }} ${{ needs.sync-unit.result }} ${{ needs.sync-e2e.result }} ${{ needs.web-e2e.result }} ${{ needs.pipeline.result }}
+        run: |
+          passed=false; rehearsal=false; ship=""; via=""
+          [ "$TESTED" != true ] && [ "$RESULTS" = "success success success success success" ] && passed=true
+          if [ "$FORCE" = true ]; then
+            rehearsal=true
+            [ -n "$FALLBACK" ] && { ship="$FALLBACK"; via=fallback; }
+          elif [ "$TESTED" = true ] || [ "$passed" = true ]; then ship="$SHA"; via=head
+          elif [ -n "$FALLBACK" ] && [ "$FALLBACK" != "$SHA" ]; then ship="$FALLBACK"; via=fallback
+          fi
+          { echo "ship=$ship"; echo "via=$via"; echo "passed=$passed"; echo "rehearsal=$rehearsal"; } >> "$GITHUB_OUTPUT"
+          echo "newest $SHA tested=$TESTED tests: $RESULTS -> ship ${ship:-nothing} via ${via:-none} (rehearsal=$rehearsal)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # The site of the fallback commit, only on the fallback path (the steps of `site`).
+  site-fallback:
+    needs: [ref, verdict]
+    # !cancelled(): success() would also look at the failed test jobs behind `verdict`.
+    if: ${{ !cancelled() && needs.verdict.result == 'success' && needs.verdict.outputs.via == 'fallback' }}
+    runs-on: ubuntu-latest
+    env:
+      COMMIT: ${{ needs.verdict.outputs.ship }}
+      SITE_ARTIFACT: site-fallback
+    defaults:
+      run:
+        working-directory: apps/web
+    steps: *site-steps
+
+  # The data files, built from the newest commit in parallel with its tests (they do not depend on each other); they
+  # deploy only if `verdict` takes the head path. `data-fallback` runs the same steps (YAML anchor) for the fallback
+  # commit; COMMIT, API_ARTIFACT and RUN_KEY tell them apart (RUN_KEY keeps their cache keys apart).
   data:
     needs: [ref]
     if: ${{ vars.DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
+    env:
+      COMMIT: ${{ needs.ref.outputs.sha }}
+      API_ARTIFACT: api
+      RUN_KEY: ${{ github.run_id }}
     outputs:
       deploy: ${{ steps.decide.outputs.deploy }}
-    steps:
+    steps: &data-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: 1220mabe/sideboard-sage
           ssh-key: ${{ secrets.SOURCE_KEY }}
           persist-credentials: false
-          ref: ${{ needs.ref.outputs.sha }}
+          ref: ${{ env.COMMIT }}
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           enable-cache: true
@@ -310,7 +392,7 @@ jobs:
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: pipeline/data
-          key: pipeline-data-${{ steps.day.outputs.d }}-${{ github.run_id }}
+          key: pipeline-data-${{ steps.day.outputs.d }}-${{ env.RUN_KEY }}
           restore-keys: |
             pipeline-data-${{ steps.day.outputs.d }}-
             pipeline-data-
@@ -429,7 +511,7 @@ jobs:
         id: decide
         working-directory: pipeline
         env:
-          SHA: ${{ needs.ref.outputs.sha }}
+          SHA: ${{ env.COMMIT }}
           SCHEDULED: ${{ github.event_name == 'schedule' && '--scheduled' || '' }}
         run: |
           curl -fsS --max-time 20 --retry 2 "https://sideboard-sage.pages.dev/api/v1/status.json" -o live-status.json || rm -f live-status.json
@@ -442,10 +524,10 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: apps/web/public/api
-          key: api-good-${{ github.run_id }}
+          key: api-good-${{ env.RUN_KEY }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: api
+          name: ${{ env.API_ARTIFACT }}
           path: apps/web/public/api
           retention-days: 1
           compression-level: 6
@@ -454,20 +536,28 @@ jobs:
   # Turn on by setting the repo variable DEPLOY_ENABLED=true and adding the
   # secrets CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID. See docs/DEPLOY.md.
   # The pages are written while the browser tests run, so the deploy only uploads (about a minute off the critical path).
+  # Building them is not shipping them: `deploy` takes this job's output only when `verdict` chose the head path.
+  # `pages-fallback` runs the same steps (YAML anchor) for the fallback commit.
   pages:
     needs: [ref, site, data]
     if: ${{ !cancelled() && needs.site.result == 'success' && needs.data.result == 'success' && needs.data.outputs.deploy == 'true' && vars.DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    steps:
+    env:
+      COMMIT: ${{ needs.ref.outputs.sha }}
+      SITE_ARTIFACT: site
+      API_ARTIFACT: api
+      PAGES_ARTIFACT: pages
+      RUN_KEY: ${{ github.run_id }}
+    steps: &pages-steps
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: site
+          name: ${{ env.SITE_ARTIFACT }}
           path: out
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: api
+          name: ${{ env.API_ARTIFACT }}
           path: out/api
       # Pages for every format, archetype and recent tournament, with their share images (docs/DEPLOY.md).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -475,7 +565,7 @@ jobs:
           repository: 1220mabe/sideboard-sage
           ssh-key: ${{ secrets.SOURCE_KEY }}
           persist-credentials: false
-          ref: ${{ needs.ref.outputs.sha }}
+          ref: ${{ env.COMMIT }}
           path: repo
           sparse-checkout: apps/web
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
@@ -490,7 +580,7 @@ jobs:
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: og-cache
-          key: og-${{ github.run_id }}
+          key: og-${{ env.RUN_KEY }}
           restore-keys: og-
       - name: Install the page writer
         working-directory: repo/apps/web
@@ -517,26 +607,60 @@ jobs:
         run: node scripts/budget.mjs --files --site "$GITHUB_WORKSPACE/out"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: pages
+          name: ${{ env.PAGES_ARTIFACT }}
           path: out
           compression-level: 0
           retention-days: 1
+
+  # The fallback path (`verdict` via=fallback): the newest commit failed a test, so the newest earlier commit that passed
+  # them is rebuilt with fresh data, after the verdict (only on a failing main, so the head path keeps its speed).
+  data-fallback:
+    needs: [ref, verdict]
+    if: ${{ !cancelled() && needs.verdict.result == 'success' && needs.verdict.outputs.via == 'fallback' && vars.DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      COMMIT: ${{ needs.verdict.outputs.ship }}
+      API_ARTIFACT: api-fallback
+      RUN_KEY: ${{ github.run_id }}-fallback
+    outputs:
+      deploy: ${{ steps.decide.outputs.deploy }}
+    steps: *data-steps
+
+  pages-fallback:
+    needs: [ref, verdict, site-fallback, data-fallback]
+    if: ${{ !cancelled() && needs.verdict.outputs.via == 'fallback' && needs.site-fallback.result == 'success' && needs.data-fallback.result == 'success' && needs.data-fallback.outputs.deploy == 'true' && vars.DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      COMMIT: ${{ needs.verdict.outputs.ship }}
+      SITE_ARTIFACT: site-fallback
+      API_ARTIFACT: api-fallback
+      PAGES_ARTIFACT: pages-fallback
+      RUN_KEY: ${{ github.run_id }}-fallback
+    steps: *pages-steps
 
   deploy:
     # One deploy at a time, in order: two overlapping deploys could ship out of order and post twice.
     concurrency:
       group: deploy-main
       cancel-in-progress: false
-    needs: [ref, web-unit, sync-unit, sync-e2e, site, web-e2e, pipeline, data, mark, pages]
-    # A commit that was already tested skips the test jobs (they count as skipped, not failed).
-    # A run whose data did not change skips `pages`, and with it this job (Issue #310).
-    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && needs.pages.result == 'success' && vars.DEPLOY_ENABLED == 'true' }}
+    needs: [ref, verdict, pages, pages-fallback]
+    # The test gate is `verdict` alone. Head path: the newest commit's pages, only when it was tested before or passed
+    # every test now. Fallback path: the pages of the newest earlier commit that passed. Nothing else is ever uploaded,
+    # and failed tests of the newest commit still fail the run and alert. A run whose data did not change skips the
+    # pages job, and with it this one (Issue #310). A force_fallback rehearsal runs this job without uploading or posting.
+    if: ${{ !cancelled() && needs.verdict.result == 'success' && vars.DEPLOY_ENABLED == 'true' && (needs.verdict.outputs.via == 'head' && needs.verdict.outputs.ship == needs.ref.outputs.sha && needs.pages.result == 'success' || needs.verdict.outputs.via == 'fallback' && needs.pages-fallback.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
     # Posting secrets are not in the job env: install, build and the Cloudflare deploy never see them. Only the
     # steps that post get them, and the `flags` step (in the `ref` job) tells them which ones are set.
     env:
+      COMMIT: ${{ needs.verdict.outputs.ship }}
+      PAGES_ARTIFACT: ${{ needs.verdict.outputs.via == 'fallback' && 'pages-fallback' || 'pages' }}
+      # false in a force_fallback rehearsal: no upload, no smoke test, no search-engine ping, no posts.
+      LIVE: ${{ needs.verdict.outputs.rehearsal != 'true' }}
       X_POSTING: ${{ vars.X_POSTING }}
       SOCIAL_POSTING: ${{ vars.SOCIAL_POSTING }}
       X_MONTHLY_CAP: ${{ vars.X_MONTHLY_CAP }}
@@ -549,7 +673,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: pages
+          name: ${{ env.PAGES_ARTIFACT }}
           path: out
       # pipeline and data/partners (with data/sources.yaml beside it) only for the partner pages below.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -557,7 +681,7 @@ jobs:
           repository: 1220mabe/sideboard-sage
           ssh-key: ${{ secrets.SOURCE_KEY }}
           persist-credentials: false
-          ref: ${{ needs.ref.outputs.sha }}
+          ref: ${{ env.COMMIT }}
           path: repo
           sparse-checkout: |
             apps/web
@@ -619,7 +743,8 @@ jobs:
           for f in sitemap.xml sitemap-pages.xml; do
             curl -fsS --max-time 20 --retry 2 "https://sideboard-sage.pages.dev/$f" -o "prev-sitemaps/$f" || rm -f "prev-sitemaps/$f"
           done
-      - uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4
+      - if: ${{ env.LIVE == 'true' }}
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -627,6 +752,7 @@ jobs:
       # Post-deploy smoke test (Issue #100): about 10 seconds. Key pages answer 200 and the JSON just shipped is the
       # build in `out` and not an empty file. Failure only alerts (Discord); a rollback stays a manual dashboard step.
       - name: Smoke test the deployed site
+        if: ${{ env.LIVE == 'true' }}
         continue-on-error: true
         env:
           HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -645,6 +771,7 @@ jobs:
           exit 1
       # IndexNow (Bing, Yandex, Naver, Seznam): the new and re-dated sitemap addresses, one POST, never fails the job.
       - name: Tell search engines what changed
+        if: ${{ env.LIVE == 'true' }}
         continue-on-error: true
         working-directory: repo/apps/web
         run: pnpm indexnow --out "$GITHUB_WORKSPACE/out" --previous "$GITHUB_WORKSPACE/prev-sitemaps"
@@ -652,7 +779,7 @@ jobs:
       # when the variable X_POSTING is "off". The ledger (posted ids and the monthly counter) lives in the Actions cache.
       - name: Restore X ledger
         id: xledger
-        if: ${{ (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.x == 'true' && env.X_POSTING != 'off' }}
+        if: ${{ env.LIVE == 'true' && (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.x == 'true' && env.X_POSTING != 'off' }}
         continue-on-error: true
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -662,7 +789,7 @@ jobs:
       # Fail closed (#111): a lost cache entry would reset the monthly counter and bypass the cap, so without a
       # restored ledger nothing is posted. The first ever run sets the variable X_LEDGER_INIT=true (docs/OPERATIONS.md).
       - name: Post to X
-        if: ${{ (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.x == 'true' && env.X_POSTING != 'off' && (steps.xledger.outputs.cache-matched-key != '' || vars.X_LEDGER_INIT == 'true') }}
+        if: ${{ env.LIVE == 'true' && (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.x == 'true' && env.X_POSTING != 'off' && (steps.xledger.outputs.cache-matched-key != '' || vars.X_LEDGER_INIT == 'true') }}
         continue-on-error: true
         working-directory: repo/apps/web
         env:
@@ -683,7 +810,7 @@ jobs:
       # like the X ledger: without a restored ledger nothing is posted unless X_LEDGER_INIT is "true" (first run only).
       - name: Restore Buffer ledger
         id: bufledger
-        if: ${{ (github.event_name == 'schedule' || inputs.post) && (needs.ref.outputs.buffer == 'true' && env.BUFFER_POSTING != 'off' || needs.ref.outputs.discord == 'true') }}
+        if: ${{ env.LIVE == 'true' && (github.event_name == 'schedule' || inputs.post) && (needs.ref.outputs.buffer == 'true' && env.BUFFER_POSTING != 'off' || needs.ref.outputs.discord == 'true') }}
         continue-on-error: true
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -694,7 +821,7 @@ jobs:
       # ledger entry per item and channel, a failed channel is retried on later runs, and Discord says when Buffer did not post.
       - name: Post to X through Buffer and to Discord
         id: dispatch
-        if: ${{ (github.event_name == 'schedule' || inputs.post) && (needs.ref.outputs.buffer == 'true' && env.BUFFER_POSTING != 'off' || needs.ref.outputs.discord == 'true') && (steps.bufledger.outputs.cache-matched-key != '' || vars.X_LEDGER_INIT == 'true') }}
+        if: ${{ env.LIVE == 'true' && (github.event_name == 'schedule' || inputs.post) && (needs.ref.outputs.buffer == 'true' && env.BUFFER_POSTING != 'off' || needs.ref.outputs.discord == 'true') && (steps.bufledger.outputs.cache-matched-key != '' || vars.X_LEDGER_INIT == 'true') }}
         continue-on-error: true
         working-directory: repo/apps/web
         env:
@@ -705,7 +832,7 @@ jobs:
       # Discord-only fallback (docs/OPERATIONS.md, "One dispatch path"): when the Buffer/Discord dispatch above did not run (no Buffer
       # secrets, Buffer off, or its ledger missing), new tournaments still go to the team's Discord channel. Never blocks a deploy.
       - name: Announce new tournaments
-        if: ${{ (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.discord == 'true' && steps.dispatch.outcome != 'success' }}
+        if: ${{ env.LIVE == 'true' && (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.discord == 'true' && steps.dispatch.outcome != 'success' }}
         continue-on-error: true
         working-directory: repo/apps/web
         env:
@@ -721,7 +848,7 @@ jobs:
       # Optional free posting to Bluesky and Mastodon (docs/OPERATIONS.md). Each network needs its own secrets; the
       # variable SOCIAL_POSTING set to "off" stops both. Its own ledger keeps one post per item per network.
       - name: Restore social ledger
-        if: ${{ (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.social == 'true' && env.SOCIAL_POSTING != 'off' }}
+        if: ${{ env.LIVE == 'true' && (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.social == 'true' && env.SOCIAL_POSTING != 'off' }}
         continue-on-error: true
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -729,7 +856,7 @@ jobs:
           key: social-ledger-${{ github.run_id }}
           restore-keys: social-ledger-
       - name: Post to Bluesky, Mastodon, Threads and Instagram
-        if: ${{ (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.social == 'true' && env.SOCIAL_POSTING != 'off' }}
+        if: ${{ env.LIVE == 'true' && (github.event_name == 'schedule' || inputs.post) && needs.ref.outputs.social == 'true' && env.SOCIAL_POSTING != 'off' }}
         continue-on-error: true
         working-directory: repo/apps/web
         env:
@@ -752,10 +879,10 @@ jobs:
           path: social-ledger
           key: social-ledger-${{ github.run_id }}
 
-  # Remembers that every test passed for this commit, so the next runs skip them.
+  # Remembers that every test passed for this commit, so the next runs skip them (and can fall back to it).
   mark:
-    needs: [ref, web-unit, sync-unit, sync-e2e, web-e2e, pipeline]
-    if: ${{ needs.ref.outputs.tested != 'true' && !cancelled() && !contains(needs.*.result, 'failure') }}
+    needs: [ref, verdict]
+    if: ${{ !cancelled() && needs.verdict.outputs.passed == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - run: mkdir .tested && echo ok > .tested/ok
@@ -765,15 +892,34 @@ jobs:
           key: tested-${{ needs.ref.outputs.sha }}
 
   # A failed run must not go unnoticed: a Discord message with the run link (a public Issue would show the failure to
-  # everyone). GitHub also emails the owner about a failed scheduled run.
+  # everyone). GitHub also emails the owner about a failed scheduled run. failure() covers every job before these, so
+  # failed tests on main alert on every run, even when the fallback commit was deployed.
   alert:
-    needs: [ref, data, site, deploy, mark]
+    needs: [ref, verdict, data, site, data-fallback, site-fallback, deploy, mark]
     if: ${{ failure() && needs.ref.outputs.discord == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - env:
           HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ needs.ref.outputs.sha }}
+          TESTED: ${{ needs.ref.outputs.tested }}
+          PASSED: ${{ needs.verdict.outputs.passed }}
+          SHIP: ${{ needs.verdict.outputs.ship }}
+          REHEARSAL: ${{ needs.verdict.outputs.rehearsal }}
+          DATA: ${{ needs.data-fallback.result }}
+          DUE: ${{ needs.data-fallback.outputs.deploy }}
+          DEPLOY: ${{ needs.deploy.result }}
         run: |
-          MSG="Refresh or deploy failed, the site keeps the last good data: $RUN"
+          if [ "$TESTED" = true ] || [ "$PASSED" = true ]; then
+            MSG="Refresh or deploy failed, the site keeps the last good data: $RUN"
+          elif [ -z "$SHIP" ]; then
+            MSG="Tests fail on main ${SHA:0:7} and no earlier tested commit was found: nothing is deployed and the data is not refreshed until main passes: $RUN"
+          else
+            if [ "$REHEARSAL" = true ]; then d="force_fallback rehearsal: nothing was uploaded"
+            elif [ "$DEPLOY" = success ]; then d="this run deployed it with fresh data"
+            elif [ "$DATA" = success ] && [ "$DUE" != true ]; then d="no deploy was due this run"
+            else d="but this run's refresh or deploy of it failed too, the site keeps the last good data"; fi
+            MSG="Tests fail on main ${SHA:0:7}: the site stays on the last tested commit ${SHIP:0:7} until main passes ($d): $RUN"
+          fi
           curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
