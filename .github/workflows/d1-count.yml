@@ -1,6 +1,6 @@
 name: D1 count
 
-# Numbers for the owner: how many accounts exist, how many signed up in the last 7 days and how many synced anything (#175), and the weekly buy-funnel line (#239: opens, shop clicks and
+# Numbers for the owner: how many accounts exist, how many signed up in the last 7 days and how many synced anything (#175) and how many were used in the last 7 and 28 days, and the weekly buy-funnel line (#239: opens, shop clicks and
 # click rate per placement, shop clicks toward the stop rule; counts only, nothing about a visitor). Runs with the same
 # read token as the backup and prints only these numbers (no emails, no records) to the log and, when the webhook is
 # set, to Discord. Off until the owner sets
@@ -54,7 +54,11 @@ jobs:
           # Database size against the free 5 GB; from 3 GB the message says so (the limit stops writes, it never bills).
           size=$(printf '%s' "$out" | jq -r '.[0].meta.size_after // 0')
           mb=$((size / 1048576))
-          msg="Accounts: $n ($week new in the last 7 days, $active activated: at least one synced record). Database: $mb MB of 5000."
+          # Retention: accounts signed in within the last 7 and 28 days (last_seen is a UTC day; today counts). A
+          # second query, so a database without the column (migrations/0001-last-seen.sql not applied) only says so.
+          seen=$(npx --yes wrangler@4.146.0 d1 execute sideboard-sage-sync --remote --json --command "SELECT COALESCE(SUM(last_seen >= date('now', '-6 days')), 0) AS d7, COALESCE(SUM(last_seen >= date('now', '-27 days')), 0) AS d28 FROM users" 2>/dev/null | jq -r '.[0].results[0] | "\(.d7) seen in the last 7 days, \(.d28) in 28"' 2>/dev/null) || seen=''
+          case "$seen" in [0-9]*) ;; *) seen="seen: n/a (apply migrations/0001-last-seen.sql)";; esac
+          msg="Accounts: $n ($week new in the last 7 days, $active activated: at least one synced record; $seen). Database: $mb MB of 5000."
           [ "$mb" -ge 3000 ] && msg="$msg Over 3 GB: lower the per-account caps or prune (docs/DEPLOY.md, Growth limits)."
           echo "$msg"
           [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c}')" "$HOOK" || true
