@@ -61,20 +61,49 @@ jobs:
           if not newest or now.date() - datetime.fromisoformat(newest).date() > timedelta(days=3):
               problems.append(f"no event newer than {newest or 'never'} in any format (a source may have stalled)")
           # Per format and event type (status.json "latest_events"): a stale Challenge fails, a stale League only warns.
+          # The limit follows the weekdays the type really runs (Vintage Challenges: Thu, Sat, Sun, so Sun to Thu is normal):
+          # the next usual day after the newest event, plus one day of grace (the source posts a day late).
+          # A weekday is usual when the type had an event on it in at least 3 of the 4 weeks up to the newest event
+          # (the same rule as the pipeline's find_gaps). With no usual weekday found, the fixed limit applies.
+          def kind_of(name):
+              low = name.lower()
+              return next((k for w, k in (("league", "league"), ("challenge", "challenge")) if w in low), None)
+          def next_expected(dates, day):
+              d0 = datetime.fromisoformat(day).date()
+              usual = set()
+              for wd in range(7):
+                  hits = sum(1 for k in range(4) if (d0 - timedelta(days=(d0.weekday() - wd) % 7 + 7 * k)).isoformat() in dates)
+                  if hits >= 3:
+                      usual.add(wd)
+              for n in range(1, 8):
+                  if (d0 + timedelta(days=n)).weekday() in usual:
+                      return d0 + timedelta(days=n)
+              return None
           today = now.date()
           for f in FORMATS:
               if f in PAPER_ONLY:
                   continue
               latest = s.get("latest_events", {}).get(f, {})
+              t = json.load(open(f"t-{f}.json"))
+              evs = t.get("events", []) if isinstance(t, dict) else t
               for kind, limit, fails in (("challenge", 3, True), ("league", 2, False)):
                   day = latest.get(kind)
                   if day is None and kind == "league":
                       continue  # not every format runs Leagues
-                  late = day is None or (today - datetime.fromisoformat(day).date()).days > limit
+                  expected = None
+                  if day is not None:
+                      dates = {e.get("date", "") for e in evs if e.get("source") == "modometa" and kind_of(e.get("name", "")) == kind}
+                      expected = next_expected(dates, day)
+                  if day is None:
+                      late = True
+                  elif expected is not None:
+                      late = (today - expected).days > 1
+                  else:
+                      late = (today - datetime.fromisoformat(day).date()).days > limit
                   if not late:
                       continue
-                  missing = "any day in the window" if day is None else (datetime.fromisoformat(day) + timedelta(days=1)).date().isoformat()
-                  line = f"{f} {kind}: newest {day or 'none'}, missing {missing} (limit {limit} days)"
+                  missing = "any day in the window" if day is None else (expected or (datetime.fromisoformat(day) + timedelta(days=1)).date()).isoformat()
+                  line = f"{f} {kind}: newest {day or 'none'}, missing {missing} (limit {limit} days if no usual weekday)"
                   if fails:
                       problems.append(line)
                   else:
@@ -94,6 +123,8 @@ jobs:
               problems.append(f"news is {nage} old")
           if problems:
               open("problems.txt", "w").write("\n".join(f"- {p}" for p in problems))
+              for p in problems:
+                  print(f"::error::{p}")
               sys.exit("; ".join(problems))
           PY
       - name: Tell Discord about rule changes (once a day)
