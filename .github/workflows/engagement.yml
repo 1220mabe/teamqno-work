@@ -41,7 +41,7 @@ jobs:
         run: |
           # The tests need the dev dependencies; the scripts themselves use only Node.
           pnpm install --frozen-lockfile --prefer-offline >/dev/null 2>&1 || exit 1
-          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec vitest run src/lib/engagement.test.ts scripts/engagement.run.test.ts src/lib/flywheel.test.ts scripts/rollup.run.test.ts scripts/link-check.test.ts
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec vitest run src/lib/engagement.test.ts src/lib/discordFormat.test.ts scripts/engagement.run.test.ts src/lib/flywheel.test.ts scripts/rollup.run.test.ts scripts/link-check.test.ts
       - name: Read the counts of our own posts
         continue-on-error: true
         working-directory: apps/web

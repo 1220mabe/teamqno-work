@@ -60,15 +60,27 @@ jobs:
           try { prev = JSON.parse(fs.readFileSync("prev/lighthouse.json")).pages || {}; } catch {}
           const problems = [];
           const want = process.env.PAGES.split(" ").map((p) => p.replace(/\//g, "_"));
+          const path = (k) => k.replace(/_/g, "/");
           for (const k of want) {
             const c = pages[k];
-            if (!c) { problems.push(k + ": no result"); continue; }
-            if (c.lcp > 4000) problems.push(`${k}: LCP ${c.lcp} ms over 4000`);
-            if (prev[k] && prev[k].score - c.score > 10) problems.push(`${k}: score ${prev[k].score} to ${c.score}`);
+            if (!c) { problems.push(path(k) + ": no result"); continue; }
+            if (c.lcp > 4000) problems.push(`${path(k)}: LCP ${c.lcp} ms over 4000`);
+            if (prev[k] && prev[k].score - c.score > 10) problems.push(`${path(k)}: score ${prev[k].score} to ${c.score}`);
           }
           fs.writeFileSync("out/lighthouse.json", JSON.stringify({ date: new Date().toISOString().slice(0, 10), pages }, null, 1));
           console.log(JSON.stringify(pages));
-          if (problems.length) { fs.writeFileSync("problems.txt", problems.join("; ")); console.log(problems.join("\n")); }
+          if (problems.length) {
+            fs.writeFileSync("problems.txt", problems.join("\n"));
+            console.log(problems.join("\n"));
+            // Every page's numbers for the message, aligned in a code block (Discord has no tables).
+            const rows = [["page", "score", "was", "LCP ms", "CLS", "TBT ms"], ...want.map((k) => {
+              const c = pages[k];
+              return c ? [path(k), c.score, prev[k]?.score ?? "-", c.lcp, c.cls, c.tbt] : [path(k), "-", prev[k]?.score ?? "-", "-", "-", "-"];
+            })].map((r) => r.map(String));
+            const w = rows[0].map((_, i) => Math.max(...rows.map((r) => r[i].length)));
+            const line = (r) => r.map((v, i) => (i === 0 ? v.padEnd(w[i]) : v.padStart(w[i]))).join("  ");
+            fs.writeFileSync("table.txt", ["```", ...rows.map(line), "```"].join("\n"));
+          }
           JS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
@@ -81,8 +93,9 @@ jobs:
           HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           if [ -s problems.txt ]; then
-            msg="Lighthouse regression: $(cat problems.txt)"
-            echo "::error::$msg"
-            [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c}')" "$HOOK" || true
+            # The annotation keeps one line; the message gets a headline, bullets, every page's numbers and the run.
+            echo "::error::Lighthouse regression: $(paste -sd ';' problems.txt | sed 's/;/; /g')"
+            msg="**Lighthouse: Regression**"$'\n'"$(sed 's/^/- /' problems.txt)"$'\n'"$(cat table.txt 2>/dev/null)"$'\n'"Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
             exit 1
           fi

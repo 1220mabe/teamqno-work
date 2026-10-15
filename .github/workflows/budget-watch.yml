@@ -57,6 +57,7 @@ jobs:
             done
           fi
           if [ "$level" -ge 1 ] && [ -n "$HOOK" ]; then
-            msg=$(echo "$out" | jq -r '"Actions minutes: \(.used) of \(.quota) (\(.pct) percent), level \(.level). " + (if .level >= 3 then "Only the refresh runs." elif .level == 2 then "Optional workflows are off." else "Watching." end)')
-            curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c}')" "$HOOK" || true
+            msg=$(echo "$out" | jq -r '(if .level >= 3 then ["Refresh only", "Only the refresh runs."] elif .level == 2 then ["Optional off", "Optional workflows are off."] else ["Watching"] end) as $s
+              | "**Actions minutes: \($s[0])**\n- Used: \(.used) of \(.quota) minutes (\(.pct) percent)\n- Level: \(.level) of 3" + (if $s[1] then "\n- \($s[1])" else "" end)')
+            curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
           fi

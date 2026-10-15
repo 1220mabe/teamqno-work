@@ -57,8 +57,10 @@ jobs:
           cat "$RUNNER_TEMP/cards-check.txt"
           rm -f data/mtgjson-atomic.json.xz
           if [ "$rc" -eq 2 ] && [ -n "$HOOK" ]; then
-            MSG="Card data cross-check (Scryfall vs MTGJSON): $RUN"$'\n'"$(head -c 1500 "$RUNNER_TEMP/cards-check.txt")"
-            curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
+            # Whole lines only, under the message limit, with a note when some were left out.
+            fit() { awk -v max="$1" '!cut && n + length($0) + 1 <= max { n += length($0) + 1; print; next } { cut++ } END { if (cut) printf "(%d more line%s cut; the full text is in the run log)\n", cut, (cut == 1 ? "" : "s") }'; }
+            MSG="**Card data cross-check: Disagreement**"$'\n'"Scryfall vs MTGJSON:"$'\n'"$(sed 's/^cards-crosscheck: //; s/^/- /' "$RUNNER_TEMP/cards-check.txt" | fit 1500)"$'\n'"Run: $RUN"
+            curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
           fi
       - name: Re-test the answer rankings; promote a better method or keep the deployed one
         working-directory: pipeline
@@ -135,14 +137,16 @@ jobs:
               old = subprocess.run(["git", "show", f"HEAD:data/archetypes/{f.name}"], capture_output=True, text=True).stdout
               seen = {a["name"] for a in (yaml.safe_load(old) or {}).get("archetypes") or []} if old else set()
               out += [f"{a['name']} ({f.name.split('.')[0]}, {a.get('share', 0):.1%})" for a in now if a["name"] not in seen and a.get("share", 0) >= 0.01]
-          print("; ".join(out))
+          print("\n".join(out))
           PY
           )
           [ -n "$new" ] || exit 0
-          echo "::notice::new provisional names: $new"
+          echo "::notice::new provisional names: $(printf '%s\n' "$new" | paste -sd ';' - | sed 's/;/; /g')"
           [ -n "$HOOK" ] || exit 0
-          MSG="New archetype names to review: $new. Promote one with: python -m sideboard_sage_pipeline promote-name --format <Format> --name \"<name>\" [--as \"<name players say>\"]"
-          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
+          fit() { awk -v max="$1" '!cut && n + length($0) + 1 <= max { n += length($0) + 1; print; next } { cut++ } END { if (cut) printf "(%d more line%s cut; the full text is in the run log)\n", cut, (cut == 1 ? "" : "s") }'; }
+          cmd='python -m sideboard_sage_pipeline promote-name --format <Format> --name "<name>" [--as "<name players say>"]'
+          MSG="**Archetype names: New**"$'\n'"$(printf '%s\n' "$new" | sed 's/^/- /' | fit 1500)"$'\n'"Promote one with:"$'\n''```'$'\n'"$cmd"$'\n''```'
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
       - name: Permission watch (big events we cannot use, ledger status, drafts waiting; Issue #313)
         # Reads only permitted sources (data/sources.yaml). Drafts are written on the owner's machine, never here.
         continue-on-error: true
@@ -153,8 +157,10 @@ jobs:
         run: |
           uv run python -m sideboard_sage_pipeline sources-watch --discord "$RUNNER_TEMP/sources.txt" >> "$GITHUB_STEP_SUMMARY"
           [ -n "$HOOK" ] || exit 0
-          MSG=$(head -c 1900 "$RUNNER_TEMP/sources.txt")
-          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
+          # The digest is a headline, a code block and bullets (permissions.discord_digest); whole lines only, and a
+          # code block cut open is closed.
+          MSG=$(awk -v max=1800 '!cut && n + length($0) + 1 <= max { n += length($0) + 1; if ($0 ~ /^```/) f = !f; print; next } { cut++ } END { if (f) print "```"; if (cut) printf "(%d more line%s cut; the full text is in the run log)\n", cut, (cut == 1 ? "" : "s") }' "$RUNNER_TEMP/sources.txt")
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
       - name: Partner value report (each partner's closed months, written once; Issue #313)
         # Only rows of data/sources.yaml with a partner block; a removed block deletes data/partners/<id>.
         continue-on-error: true
@@ -194,9 +200,9 @@ jobs:
         env:
           HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          low=$(jq -r '.formats | to_entries[] | select(.value.below_floor) | "\(.key) \(.value.community * 100 | floor)% (floor \(.value.floor * 100 | floor)%)"' data/names_coverage.json | paste -sd, -)
+          low=$(jq -r '.formats | to_entries[] | select(.value.below_floor) | "\(.key) \(.value.community * 100 | floor)% (floor \(.value.floor * 100 | floor)%)"' data/names_coverage.json)
           [ -n "$low" ] || exit 0
-          echo "::warning::community archetype names cover too few decks: $low"
+          echo "::warning::community archetype names cover too few decks: $(printf '%s\n' "$low" | paste -sd, -)"
           [ -n "$HOOK" ] || exit 0
-          MSG="Archetype names need review after the weekly refresh: $low. See data/archetypes/<format>.draft.yaml in the source repo."
-          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
+          MSG="**Archetype names: Review**"$'\n'"Community names cover too few decks after the weekly refresh:"$'\n'"$(printf '%s\n' "$low" | sed 's/^/- /')"$'\n'"See data/archetypes/<format>.draft.yaml in the source repo."
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true

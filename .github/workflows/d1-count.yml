@@ -34,6 +34,7 @@ jobs:
             apps/sync/src/clickReport.ts
             apps/sync/scripts/click-report.mjs
             apps/web/src/lib/buyKeys.ts
+            apps/web/src/lib/discordFormat.ts
           sparse-checkout-cone-mode: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
@@ -56,12 +57,18 @@ jobs:
           mb=$((size / 1048576))
           # Retention: accounts signed in within the last 7 and 28 days (last_seen is a UTC day; today counts). A
           # second query, so a database without the column (migrations/0001-last-seen.sql not applied) only says so.
-          seen=$(npx --yes wrangler@4.146.0 d1 execute sideboard-sage-sync --remote --json --command "SELECT COALESCE(SUM(last_seen >= date('now', '-6 days')), 0) AS d7, COALESCE(SUM(last_seen >= date('now', '-27 days')), 0) AS d28 FROM users" 2>/dev/null | jq -r '.[0].results[0] | "\(.d7) seen in the last 7 days, \(.d28) in 28"' 2>/dev/null) || seen=''
-          case "$seen" in [0-9]*) ;; *) seen="seen: n/a (apply migrations/0001-last-seen.sql)";; esac
-          msg="Accounts: $n ($week new in the last 7 days, $active activated: at least one synced record; $seen). Database: $mb MB of 5000."
-          [ "$mb" -ge 3000 ] && msg="$msg Over 3 GB: lower the per-account caps or prune (docs/DEPLOY.md, Growth limits)."
+          seen=$(npx --yes wrangler@4.146.0 d1 execute sideboard-sage-sync --remote --json --command "SELECT COALESCE(SUM(last_seen >= date('now', '-6 days')), 0) AS d7, COALESCE(SUM(last_seen >= date('now', '-27 days')), 0) AS d28 FROM users" 2>/dev/null | jq -r '.[0].results[0] | "\(.d7) / \(.d28)"' 2>/dev/null) || seen=''
+          note=''
+          case "$seen" in [0-9]*) ;; *) seen="n/a"; note=$'\n'"- Seen: n/a until migrations/0001-last-seen.sql is applied.";; esac
+          status=OK
+          if [ "$mb" -ge 3000 ]; then status="Over 3 GB"; note="$note"$'\n'"- Over 3 GB: lower the per-account caps or prune (docs/DEPLOY.md, Growth limits)."; fi
+          # Headline, then the numbers aligned in a code block (Discord has no tables). The fences stay in single quotes.
+          msg=$(printf '**Accounts: %s**\n```\n%-28s %9s\n%-28s %9s\n%-28s %9s\n%-28s %9s\n%-28s %9s\n```' "$status" \
+            "Accounts" "$n" "New in the last 7 days" "$week" "Activated (1+ synced record)" "$active" \
+            "Seen in the last 7 / 28 days" "$seen" "Database, MB of 5000" "$mb")
+          msg="$msg$note"
           echo "$msg"
-          [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c}')" "$HOOK" || true
+          [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
       - name: Buy funnel
         working-directory: apps/sync
         env:
@@ -73,7 +80,7 @@ jobs:
           out=$(npx --yes wrangler@4.146.0 d1 execute sideboard-sage-sync --remote --json --command "SELECT day, surface, shop, n FROM clicks WHERE day >= date('now', '-56 days')" 2>/dev/null) || out='[{"results":[]}]'
           msg=$(printf '%s' "$out" | node --no-warnings scripts/click-report.mjs) || exit 0
           echo "$msg"
-          [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c}')" "$HOOK" || true
+          [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
 
   # A backup that silently stopped is the worst kind (docs/RECOVERY.md): on Monday, a day after Sunday's export, check
   # that the newest encrypted dump on the private backups branch is at most 8 days old and not empty. It needs only
@@ -99,14 +106,14 @@ jobs:
           f=$(find b -maxdepth 1 -name 'd1-*.sql.enc' -size +0 2>/dev/null | sort | tail -n 1)
           rm -rf b
           if [ -z "$f" ]; then
-            msg="D1 backup: no dump on the backups branch. Run the D1 backup workflow by hand and read its log."
+            msg="**D1 backup: Missing**"$'\n'"No dump on the backups branch. Run the D1 backup workflow by hand and read its log."
           else
             d=$(basename "$f" .sql.enc)
             age=$(( ($(date -u +%s) - $(date -u -d "${d#d1-}" +%s)) / 86400 ))
             echo "D1 backup: the newest dump is $age days old."
             [ "$age" -le 8 ] && exit 0
-            msg="D1 backup: the newest dump is $age days old (expected weekly). Check the D1 backup workflow (token, passphrase, write key)."
+            msg="**D1 backup: Late**"$'\n'"The newest dump is $age days old (expected weekly). Check the D1 backup workflow (token, passphrase, write key)."
           fi
           echo "$msg"
-          [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c}')" "$HOOK" || true
+          [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
           exit 1

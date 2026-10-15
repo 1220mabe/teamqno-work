@@ -42,8 +42,10 @@ jobs:
           HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           [ -n "$HOOK" ] && [ -s coverage-alerts.txt ] || exit 0
-          MSG="Paper coverage gap (add the event by hand or check the source, docs/OPERATIONS.md): $(head -c 900 coverage-alerts.txt) Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
+          # Whole lines only, under the message limit, with a note when some were left out.
+          fit() { awk -v max="$1" '!cut && n + length($0) + 1 <= max { n += length($0) + 1; print; next } { cut++ } END { if (cut) printf "(%d more line%s cut; the full text is in the run log)\n", cut, (cut == 1 ? "" : "s") }'; }
+          MSG="**Paper coverage: Gap**"$'\n'"Add the event by hand or check the source (docs/OPERATIONS.md)."$'\n'"$(sed 's/^/- /' coverage-alerts.txt | fit 1500)"$'\n'"Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: pipeline/data/coverage-ledger.json

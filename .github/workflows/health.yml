@@ -134,16 +134,19 @@ jobs:
           HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           [ -n "$HOOK" ] && [ "$(date -u +%H)" -lt 6 ] || exit 0
-          MSG="Rules watch: the card data shows something the code may not handle yet (update pipeline rules_watch.py once checked): $(head -c 900 rules.txt)"
-          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
+          fit() { awk -v max="$1" '!cut && n + length($0) + 1 <= max { n += length($0) + 1; print; next } { cut++ } END { if (cut) printf "(%d more line%s cut; the full text is in the run log)\n", cut, (cut == 1 ? "" : "s") }'; }
+          MSG="**Rules watch: Review**"$'\n'"The card data shows something the code may not handle yet (update pipeline rules_watch.py once checked):"$'\n'"$(fit 1500 < rules.txt)"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
       - name: Tell Discord when the check failed
         if: failure()
         env:
           HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           [ -n "$HOOK" ] || exit 0
-          MSG="Health check failed: $(cat problems.txt 2>/dev/null | head -c 900 || echo 'the site or a data file could not be fetched'). Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
+          fit() { awk -v max="$1" '!cut && n + length($0) + 1 <= max { n += length($0) + 1; print; next } { cut++ } END { if (cut) printf "(%d more line%s cut; the full text is in the run log)\n", cut, (cut == 1 ? "" : "s") }'; }
+          if [ -s problems.txt ]; then body=$(fit 1500 < problems.txt); else body="- The site or a data file could not be fetched."; fi
+          MSG="**Health check: Failed**"$'\n'"$body"$'\n'"Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
 
   # Cloudflare API tokens may carry an expiry date (docs/RECOVERY.md, "Owner unavailable"); a lapsed one stops the
   # deploy, the AI drafts, the visits rollup or the D1 backup. Once a day (the run before 06:00 UTC, or by hand) each
@@ -187,5 +190,5 @@ jobs:
           [ -s tokens.txt ] || exit 0
           cat tokens.txt
           [ -n "$HOOK" ] || { echo "::error::a Cloudflare token needs renewal and there is no webhook"; exit 1; }
-          MSG="Cloudflare token renewal (docs/DEPLOY.md, Runbook, \"Rotate the Cloudflare token\"; same steps for each secret named):"$'\n'"$(cat tokens.txt)"
-          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c}')" "$HOOK" || true
+          MSG="**Cloudflare tokens: Renew**"$'\n'"$(cat tokens.txt)"$'\n'"Steps: docs/DEPLOY.md, Runbook, \"Rotate the Cloudflare token\" (the same for each secret named)."
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
