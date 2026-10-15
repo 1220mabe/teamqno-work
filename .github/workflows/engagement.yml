@@ -94,3 +94,11 @@ jobs:
             git push git@github.com:1220mabe/sideboard-sage.git HEAD:main
             rm -f "$RUNNER_TEMP/wkey"
           fi
+      - name: Tell Discord when the run failed
+        if: failure()
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          [ -n "$HOOK" ] || exit 0
+          MSG="**Engagement loop: Failed**"$'\n'"Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true

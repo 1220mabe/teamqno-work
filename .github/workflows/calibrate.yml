@@ -206,3 +206,11 @@ jobs:
           [ -n "$HOOK" ] || exit 0
           MSG="**Archetype names: Review**"$'\n'"Community names cover too few decks after the weekly refresh:"$'\n'"$(printf '%s\n' "$low" | sed 's/^/- /')"$'\n'"See data/archetypes/<format>.draft.yaml in the source repo."
           curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
+      - name: Tell Discord when the run failed
+        if: failure()
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          [ -n "$HOOK" ] || exit 0
+          MSG="**Calibrate: Failed**"$'\n'"Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true

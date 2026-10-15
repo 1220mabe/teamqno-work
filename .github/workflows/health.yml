@@ -18,7 +18,10 @@ jobs:
     steps:
       - name: Check the pages, every format's data, and how fresh it is
         run: |
-          # The public domain answers 403 to the runner (bot rules), so the probe goes to the pages.dev copy of the same deploy.
+          # The public domain answers 403 to the runner (bot rules), so the full probe goes to the pages.dev copy of the
+          # same deploy. The domain itself is checked once: 200 or 403 means it answers; no answer or a 5xx is a problem.
+          DOMAIN_CODE=$(curl -sS -L --retry 3 --retry-delay 10 --max-time 20 -o /dev/null -w '%{http_code}' https://teamqno.work/ || true)
+          export DOMAIN_CODE
           base="https://sideboard-sage.pages.dev"
           curl -fsS --retry 3 --retry-delay 10 -o /dev/null "$base/"
           curl -fsS --retry 3 --retry-delay 10 -o /dev/null "$base/tournaments/"
@@ -31,13 +34,17 @@ jobs:
             curl -fsS --retry 3 --retry-delay 10 "$base/api/v1/tournaments/$f/index.json" -o "t-$f.json"
           done
           python3 - <<'PY'
-          import json, sys
+          import json, os, sys
           from datetime import datetime, timezone, timedelta
           now = datetime.now(timezone.utc)
           problems = []
           s = json.load(open("status.json"))
           if s["counts"]["cards"] < 20000:
               problems.append("card count too low")
+          code = os.environ.get("DOMAIN_CODE", "")
+          print("teamqno.work answered", code or "nothing")
+          if code not in ("200", "403"):
+              problems.append(f"teamqno.work answered {code or 'nothing'} (expected 200 or 403)")
           fj = json.load(open("formats.json"))
           FORMATS = fj["formats"]
           PAPER_ONLY = set(FORMATS) - set(fj["mtgo"])  # no MTGO event types to check
@@ -49,6 +56,14 @@ jobs:
                   problems.append(f"{f} data is {age} old")
               if m["decks"] < 150:
                   problems.append(f"{f} has only {m['decks']} decks")
+              # The weekly calibration (pipeline calibrate.py) stamps its last WRITTEN run (a kept thin run leaves the file
+              # as it was): over 21 days means the job stopped or kept a thin run. Missing (no run yet, or data built
+              # before the stamp existed) is a log warning only.
+              cat = (m.get("calibration") or {}).get("generated_at")
+              if not cat:
+                  print(f"::warning::{f}: no calibration date in the data")
+              elif now - datetime.fromisoformat(cat) > timedelta(days=21):
+                  problems.append(f"{f} calibration is {now - datetime.fromisoformat(cat)} old (the weekly Calibrate job stopped or kept a thin run)")
           # generated_at is the build time, so a stalled source cannot show there: look at the newest event itself (#110).
           newest = ""
           for f in FORMATS:
@@ -192,3 +207,21 @@ jobs:
           [ -n "$HOOK" ] || { echo "::error::a Cloudflare token needs renewal and there is no webhook"; exit 1; }
           MSG="**Cloudflare tokens: Renew**"$'\n'"$(cat tokens.txt)"$'\n'"Steps: docs/DEPLOY.md, Runbook, \"Rotate the Cloudflare token\" (the same for each secret named)."
           curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
+
+  # Every alert above and in the other workflows goes through one Discord webhook, and a deleted or mistyped one fails
+  # silently. A GET on a live webhook answers 200, so this job fails (and GitHub emails the owner) when the secret is
+  # missing or the webhook does not answer 2xx. The URL and the answer (it holds the token) are never printed.
+  webhook:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Discord webhook is alive
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          [ -n "$HOOK" ] || { echo "::error::DISCORD_WEBHOOK_URL is not set, so no workflow can send an alert"; exit 1; }
+          code=$(curl -sS --retry 3 --retry-delay 10 --max-time 15 -o /dev/null -w '%{http_code}' "$HOOK" 2>/dev/null || true)
+          case "$code" in
+            2??) echo "Discord webhook answered $code" ;;
+            *) echo "::error::the Discord webhook answered ${code:-nothing} (deleted or wrong URL?), so no alert can reach Discord"; exit 1 ;;
+          esac
