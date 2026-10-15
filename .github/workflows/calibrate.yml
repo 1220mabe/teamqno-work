@@ -176,7 +176,9 @@ jobs:
             umask 077
             printf '%s\n' "$SOURCE_WRITE_KEY" > "$RUNNER_TEMP/wkey"
             trap 'rm -f "$RUNNER_TEMP/wkey"' EXIT # the key never outlives this step, even on a failed push
-            export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/wkey -o StrictHostKeyChecking=accept-new"
+            # GitHub's published ed25519 host key, pinned instead of trusting the first answer.
+            echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$RUNNER_TEMP/known_hosts"
+            export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/wkey -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o StrictHostKeyChecking=yes"
             REMOTE=git@github.com:1220mabe/sideboard-sage.git
             # A push to main during this long job (it runs over an hour) rejects ours: replay the one commit on the newest main and retry.
             for attempt in 1 2 3 4; do

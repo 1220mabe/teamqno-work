@@ -3,8 +3,9 @@ name: D1 backup
 # A weekly encrypted export of the accounts database (docs/SECURITY.md, "Backup and restore"). Off until the owner sets
 # the repository variable D1_BACKUP_ENABLED to "true" and adds the secrets D1_BACKUP_TOKEN (a Cloudflare API token with
 # D1 access for this account only, nothing else), CLOUDFLARE_ACCOUNT_ID and D1_BACKUP_PASSPHRASE. The dump holds
-# session hashes and deck data, so it is encrypted before it leaves the runner and kept 30 days as a private workflow
-# artifact (never a release, never a commit, never a cache). About one minute a week; skipped jobs cost nothing.
+# session hashes and deck data, so it is encrypted before it leaves the runner and pushed to the backups branch of the
+# private source repository, which keeps the newest 12 (never a workflow artifact, a release or a cache, all readable
+# from this public repository). About one minute a week; skipped jobs cost nothing.
 on:
   schedule:
     - cron: "30 5 * * 0"
@@ -41,7 +42,7 @@ jobs:
           PASSPHRASE: ${{ secrets.D1_BACKUP_PASSPHRASE }}
         run: |
           [ -n "$PASSPHRASE" ] || { echo "D1_BACKUP_PASSPHRASE is not set"; exit 1; }
-          npx --yes wrangler@4 d1 export sideboard-sage-sync --remote --output "$RUNNER_TEMP/d1.sql" > /dev/null
+          npx --yes wrangler@4.146.0 d1 export sideboard-sage-sync --remote --output "$RUNNER_TEMP/d1.sql" > /dev/null
           [ -s "$RUNNER_TEMP/d1.sql" ] || { echo "empty export"; exit 1; }
           mkdir -p "$RUNNER_TEMP/out"
           openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:PASSPHRASE -in "$RUNNER_TEMP/d1.sql" -out "$RUNNER_TEMP/out/d1-$(date -u +%Y-%m-%d).sql.enc"
@@ -49,11 +50,14 @@ jobs:
           ls -l "$RUNNER_TEMP/out"
       - name: Keep the encrypted dumps on the private backups branch (the newest 12)
         env:
-          GIT_SSH_COMMAND: ssh -i ${{ runner.temp }}/key -o StrictHostKeyChecking=accept-new
           SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
         run: |
           umask 077
           printf '%s\n' "$SOURCE_WRITE_KEY" > "$RUNNER_TEMP/key"
+          trap 'rm -f "$RUNNER_TEMP/key"' EXIT # the key never outlives this step, even on a failed push
+          # GitHub's published ed25519 host key, pinned instead of trusting the first answer.
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$RUNNER_TEMP/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o StrictHostKeyChecking=yes"
           git clone --quiet --depth 1 --branch backups git@github.com:1220mabe/sideboard-sage.git "$RUNNER_TEMP/b" 2>/dev/null \
             || { git init --quiet "$RUNNER_TEMP/b"; git -C "$RUNNER_TEMP/b" checkout --quiet -b backups; git -C "$RUNNER_TEMP/b" remote add origin git@github.com:1220mabe/sideboard-sage.git; }
           cp "$RUNNER_TEMP"/out/*.enc "$RUNNER_TEMP/b/"

@@ -44,7 +44,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          out=$(npx --yes wrangler@4 d1 execute sideboard-sage-sync --remote --json --command "SELECT COUNT(*) AS n FROM users")
+          out=$(npx --yes wrangler@4.146.0 d1 execute sideboard-sage-sync --remote --json --command "SELECT COUNT(*) AS n FROM users")
           n=$(printf '%s' "$out" | jq -r '.[0].results[0].n')
           case "$n" in ''|*[!0-9]*) echo "no count"; exit 1;; esac
           # Database size against the free 5 GB; from 3 GB the message says so (the limit stops writes, it never bills).
@@ -62,7 +62,7 @@ jobs:
           HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           # No clicks table yet (schema not applied) or no counts: one line saying so, never a failure.
-          out=$(npx --yes wrangler@4 d1 execute sideboard-sage-sync --remote --json --command "SELECT day, surface, shop, n FROM clicks WHERE day >= date('now', '-56 days')" 2>/dev/null) || out='[{"results":[]}]'
+          out=$(npx --yes wrangler@4.146.0 d1 execute sideboard-sage-sync --remote --json --command "SELECT day, surface, shop, n FROM clicks WHERE day >= date('now', '-56 days')" 2>/dev/null) || out='[{"results":[]}]'
           msg=$(printf '%s' "$out" | node --no-warnings scripts/click-report.mjs) || exit 0
           echo "$msg"
           [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c}')" "$HOOK" || true
