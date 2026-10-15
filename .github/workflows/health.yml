@@ -39,7 +39,7 @@ jobs:
               problems.append("card count too low")
           fj = json.load(open("formats.json"))
           FORMATS = fj["formats"]
-          PAPER_ONLY = set(FORMATS) - set(fj.get("mtgo") or [f for f in FORMATS if f != "premodern"])  # no MTGO event types to check
+          PAPER_ONLY = set(FORMATS) - set(fj["mtgo"])  # no MTGO event types to check
           for f in FORMATS:
               m = json.load(open(f"m-{f}.json"))
               age = now - datetime.fromisoformat(m["generated_at"])
