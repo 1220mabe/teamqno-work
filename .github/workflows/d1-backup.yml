@@ -1,6 +1,6 @@
 name: D1 backup
 
-# A weekly encrypted export of the accounts database (docs/SECURITY.md, "Backup and restore"). Off until the owner sets
+# A weekly encrypted export of the accounts database (docs/RECOVERY.md, "D1 restore"; the backup-check job in d1-count.yml alerts when it stops). Off until the owner sets
 # the repository variable D1_BACKUP_ENABLED to "true" and adds the secrets D1_BACKUP_TOKEN (a Cloudflare API token with
 # D1 access for this account only, nothing else), CLOUDFLARE_ACCOUNT_ID and D1_BACKUP_PASSPHRASE. The dump holds
 # session hashes and deck data, so it is encrypted before it leaves the runner and pushed to the backups branch of the
@@ -45,7 +45,7 @@ jobs:
           npx --yes wrangler@4.146.0 d1 export sideboard-sage-sync --remote --output "$RUNNER_TEMP/d1.sql" > /dev/null
           [ -s "$RUNNER_TEMP/d1.sql" ] || { echo "empty export"; exit 1; }
           mkdir -p "$RUNNER_TEMP/out"
-          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:PASSPHRASE -in "$RUNNER_TEMP/d1.sql" -out "$RUNNER_TEMP/out/d1-$(date -u +%Y-%m-%d).sql.enc"
+          openssl enc -aes-256-cbc -md sha256 -pbkdf2 -iter 200000 -salt -pass env:PASSPHRASE -in "$RUNNER_TEMP/d1.sql" -out "$RUNNER_TEMP/out/d1-$(date -u +%Y-%m-%d).sql.enc"
           rm -f "$RUNNER_TEMP/d1.sql"
           ls -l "$RUNNER_TEMP/out"
       - name: Keep the encrypted dumps on the private backups branch (the newest 12)

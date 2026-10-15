@@ -4,7 +4,8 @@ name: D1 count
 # click rate per placement, shop clicks toward the stop rule; counts only, nothing about a visitor). Runs with the same
 # read token as the backup and prints only these numbers (no emails, no records) to the log and, when the webhook is
 # set, to Discord. Off until the owner sets
-# the repository variable D1_COUNT_ENABLED to "true" and adds D1_BACKUP_TOKEN and CLOUDFLARE_ACCOUNT_ID.
+# the repository variable D1_COUNT_ENABLED to "true" and adds D1_BACKUP_TOKEN and CLOUDFLARE_ACCOUNT_ID. The
+# backup-check job below runs on its own whenever D1_BACKUP_ENABLED is "true".
 on:
   schedule:
     - cron: "15 6 * * 1"
@@ -69,3 +70,39 @@ jobs:
           msg=$(printf '%s' "$out" | node --no-warnings scripts/click-report.mjs) || exit 0
           echo "$msg"
           [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c}')" "$HOOK" || true
+
+  # A backup that silently stopped is the worst kind (docs/RECOVERY.md): on Monday, a day after Sunday's export, check
+  # that the newest encrypted dump on the private backups branch is at most 8 days old and not empty. It needs only
+  # SOURCE_KEY, runs whenever the backup is on, and prints the age in days, never a file or its contents.
+  backup-check:
+    if: ${{ vars.D1_BACKUP_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - id: b
+        continue-on-error: true # no branch before the first export: reported as missing below
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ref: backups
+          path: b
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+      - name: Newest backup is recent
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          f=$(find b -maxdepth 1 -name 'd1-*.sql.enc' -size +0 2>/dev/null | sort | tail -n 1)
+          rm -rf b
+          if [ -z "$f" ]; then
+            msg="D1 backup: no dump on the backups branch. Run the D1 backup workflow by hand and read its log."
+          else
+            d=$(basename "$f" .sql.enc)
+            age=$(( ($(date -u +%s) - $(date -u -d "${d#d1-}" +%s)) / 86400 ))
+            echo "D1 backup: the newest dump is $age days old."
+            [ "$age" -le 8 ] && exit 0
+            msg="D1 backup: the newest dump is $age days old (expected weekly). Check the D1 backup workflow (token, passphrase, write key)."
+          fi
+          echo "$msg"
+          [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c}')" "$HOOK" || true
+          exit 1
