@@ -142,6 +142,8 @@ jobs:
           BUFFER_CHANNEL_ID: ${{ secrets.BUFFER_CHANNEL_ID }}
           BUFFER_POSTING: ${{ vars.BUFFER_POSTING }}
           BUFFER_DAILY_CAP: ${{ vars.BUFFER_DAILY_CAP }}
+          BUFFER_X_MODE: ${{ vars.BUFFER_X_MODE }}
+          BUFFER_MIN_GAP_MIN: ${{ vars.BUFFER_MIN_GAP_MIN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           lane=""; [ "$HOT_ONLY" = true ] && lane="--hot-only"
@@ -162,6 +164,8 @@ jobs:
           BUFFER_CHANNEL_ID: ${{ secrets.BUFFER_CHANNEL_ID }}
           BUFFER_POSTING: ${{ vars.BUFFER_POSTING }}
           BUFFER_DAILY_CAP: ${{ vars.BUFFER_DAILY_CAP }}
+          BUFFER_X_MODE: ${{ vars.BUFFER_X_MODE }}
+          BUFFER_MIN_GAP_MIN: ${{ vars.BUFFER_MIN_GAP_MIN }}
           BUFFER_MONTHLY_CAP: ${{ vars.BUFFER_MONTHLY_CAP }}
           NEWSPICK_DAILY_CAP: ${{ vars.NEWSPICK_DAILY_CAP }}
           NEWSPICK_HOT_DAILY_CAP: ${{ vars.NEWSPICK_HOT_DAILY_CAP }}

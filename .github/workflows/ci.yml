@@ -668,6 +668,8 @@ jobs:
       BUFFER_POSTING: ${{ vars.BUFFER_POSTING }}
       BUFFER_DAILY_CAP: ${{ vars.BUFFER_DAILY_CAP }}
       BUFFER_X_PER_DAY: ${{ vars.BUFFER_X_PER_DAY }}
+      BUFFER_X_MODE: ${{ vars.BUFFER_X_MODE }}
+      BUFFER_MIN_GAP_MIN: ${{ vars.BUFFER_MIN_GAP_MIN }}
       BUFFER_MONTHLY_CAP: ${{ vars.BUFFER_MONTHLY_CAP }}
       BUFFER_LEAGUE_RESERVE: ${{ vars.BUFFER_LEAGUE_RESERVE }}
     steps:
