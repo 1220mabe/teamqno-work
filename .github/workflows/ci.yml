@@ -1,4 +1,7 @@
 name: CI
+# The backup schedule (apps/ci-dispatch) starts runs with as_schedule; their own title keeps them out of the manual-deploy
+# count in scripts/deploy-guard.sh.
+run-name: ${{ inputs.as_schedule == true && 'CI (backup schedule)' || 'CI' }}
 
 # This file lives in the public runner repo; the code it builds is checked out from the private source repo with a deploy
 # key. Only the owner can start it: a schedule or a manual run, never a pull request, an issue or another workflow, so
@@ -22,6 +25,10 @@ on:
         default: "0"
       force_quarantine:
         description: "Test the quarantine: treat this run's data as failing the data gate (ships the last good data, alerts Discord)"
+        type: boolean
+        default: false
+      as_schedule:
+        description: "Behave like a scheduled run: deploy only when worth it (the backup schedule apps/ci-dispatch sets this)"
         type: boolean
         default: false
       force_fallback:
@@ -506,13 +513,14 @@ jobs:
           key: ${{ steps.gate.outputs.key }}
       # Cloudflare Pages allows 500 deploys a month (Issue #310): a scheduled run deploys only for new code, a big event the
       # live site lacks, changed data once the live build is 3.5 hours old, or an 8-hour-old live build
-      # (pipeline deploy_check.py). A manual run always deploys. An unreadable live status means deploy.
+      # (pipeline deploy_check.py). A manual run always deploys, unless `as_schedule` (the backup schedule) makes it act
+      # as a scheduled one. An unreadable live status means deploy.
       - name: Deploy or skip
         id: decide
         working-directory: pipeline
         env:
           SHA: ${{ env.COMMIT }}
-          SCHEDULED: ${{ github.event_name == 'schedule' && '--scheduled' || '' }}
+          SCHEDULED: ${{ (github.event_name == 'schedule' || inputs.as_schedule == true) && '--scheduled' || '' }}
         run: |
           curl -fsS --max-time 20 --retry 2 "https://sideboard-sage.pages.dev/api/v1/status.json" -o live-status.json || rm -f live-status.json
           uv run python -m sideboard_sage_pipeline deploy-check --live live-status.json --commit "$SHA" $SCHEDULED --github-output "$GITHUB_OUTPUT" | tee -a "$GITHUB_STEP_SUMMARY"
