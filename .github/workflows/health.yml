@@ -163,7 +163,7 @@ jobs:
           MSG="**Health check: Failed**"$'\n'"$body"$'\n'"Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
 
-  # Cloudflare API tokens may carry an expiry date (docs/RECOVERY.md, "Owner unavailable"); a lapsed one stops the
+  # Cloudflare API tokens may carry an expiry date (docs/RECOVERY.md, "Expiries and renewals"); a lapsed one stops the
   # deploy, the AI drafts, the visits rollup or the D1 backup. Once a day (the run before 06:00 UTC, or by hand) each
   # token that is set is checked with Cloudflare's own verify call; one Discord message names any that expires within
   # 30 days or is no longer active. No checkout and no third-party code run here, only curl and jq. A call that does
@@ -206,6 +206,50 @@ jobs:
           cat tokens.txt
           [ -n "$HOOK" ] || { echo "::error::a Cloudflare token needs renewal and there is no webhook"; exit 1; }
           MSG="**Cloudflare tokens: Renew**"$'\n'"$(cat tokens.txt)"$'\n'"Steps: docs/DEPLOY.md, Runbook, \"Rotate the Cloudflare token\" (the same for each secret named)."
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
+
+  # Threads and Instagram tokens last 60 days; each CI run that posts refreshes them with Meta and writes the new expiry
+  # date to the social ledger (Actions cache, apps/web/src/lib/socialpost.ts), but that warning stays in the CI log.
+  # Once a day this reads the ledger (no token is used or printed: only whether each secret is set) and sends one
+  # Discord message when a set token expires within 14 days or has no refresh recorded, which means the refresh stopped
+  # (CI not posting, or the token was rejected). SOCIAL_POSTING=off skips it, as it skips the posting.
+  meta-tokens:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read the social ledger
+        if: vars.SOCIAL_POSTING != 'off'
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: social-ledger
+          key: social-ledger-none
+          restore-keys: social-ledger-
+      - name: Threads and Instagram tokens near expiry
+        if: vars.SOCIAL_POSTING != 'off'
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          HAS_threads: ${{ secrets.THREADS_TOKEN != '' }}
+          HAS_instagram: ${{ secrets.INSTAGRAM_TOKEN != '' }}
+        run: |
+          [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || [ "$(date -u +%H)" -lt 6 ] || exit 0
+          ledger=social-ledger/ledger.json
+          soon=$(( $(date -u +%s) + 14 * 86400 ))
+          : > meta.txt
+          for net in threads instagram; do
+            has="HAS_$net"; [ "${!has}" = true ] || continue
+            secret=$([ "$net" = threads ] && echo THREADS_TOKEN || echo INSTAGRAM_TOKEN)
+            exp=$(jq -r --arg n "$net" '.tokens[$n].expiresAt // empty' "$ledger" 2>/dev/null || true)
+            if [ -z "$exp" ]; then echo "- $secret: no refresh recorded in the social ledger (the daily refresh in CI is not running)" >> meta.txt; continue; fi
+            at=$(jq -rn --arg d "$exp" '$d | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601' 2>/dev/null || true)
+            echo "$secret: expires $exp"
+            if [ -z "$at" ]; then echo "::warning::$secret: unreadable expiry date in the ledger"; continue; fi
+            [ "$at" -ge "$soon" ] || echo "- $secret expires $exp" >> meta.txt
+          done
+          [ -s meta.txt ] || exit 0
+          cat meta.txt
+          [ -n "$HOOK" ] || { echo "::error::a Meta token needs renewal and there is no webhook"; exit 1; }
+          MSG="**Threads and Instagram tokens: Renew**"$'\n'"$(cat meta.txt)"$'\n'"Steps: docs/OPERATIONS.md, \"Bluesky, Mastodon, Threads and Instagram\", setup step 5, then update the secret."
           curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
 
   # Every alert above and in the other workflows goes through one Discord webhook, and a deleted or mistyped one fails
