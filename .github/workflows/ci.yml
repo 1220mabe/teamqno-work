@@ -605,6 +605,10 @@ jobs:
         continue-on-error: true
         working-directory: repo/apps/web
         run: pnpm finding-image --site "$GITHUB_WORKSPACE/out" --file "$GITHUB_WORKSPACE/repo/data/sns_findings.json"
+      - name: Draw the SNS sideboard finding picture
+        continue-on-error: true
+        working-directory: repo/apps/web
+        run: pnpm finding-image --site "$GITHUB_WORKSPACE/out" --file "$GITHUB_WORKSPACE/repo/data/sns_side.json"
       # The weekly matchup-matrix post's pictures: one per format with a usable matrix; the poster picks the one that is due. Never blocks the deploy.
       - name: Draw the matchup matrix pictures
         continue-on-error: true
