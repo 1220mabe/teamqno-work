@@ -252,6 +252,38 @@ jobs:
           MSG="**Threads and Instagram tokens: Renew**"$'\n'"$(cat meta.txt)"$'\n'"Steps: docs/OPERATIONS.md, \"Bluesky, Mastodon, Threads and Instagram\", setup step 5, then update the secret."
           curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
 
+  # X posting stalls silently (no queue, a rejected token, CI not posting). The Buffer ledger (Actions cache) records the
+  # slot of every post it booked; when the newest slot is more than 36 hours old, or the ledger is missing, this sends one
+  # Discord message. BUFFER_POSTING=off skips it, as it skips the posting. No token is used or printed.
+  x-posting:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read the Buffer ledger
+        if: vars.BUFFER_POSTING != 'off'
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: buffer-ledger
+          key: buffer-ledger-none
+          restore-keys: buffer-ledger-
+      - name: Newest booked X post
+        if: vars.BUFFER_POSTING != 'off'
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          HAS_BUFFER: ${{ secrets.BUFFER_TOKEN != '' }}
+        run: |
+          [ "$HAS_BUFFER" = true ] || exit 0
+          [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || [ "$(date -u +%H)" -lt 6 ] || exit 0
+          ledger=buffer-ledger/ledger.json
+          newest=$(jq -r '[.xslots[]?.at] | max // empty' "$ledger" 2>/dev/null || true)
+          at=$(jq -rn --arg d "$newest" '$d | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601' 2>/dev/null || true)
+          echo "newest booked X post: ${newest:-none}"
+          [ -n "$at" ] && [ "$at" -lt $(( $(date -u +%s) - 36 * 3600 )) ] || [ -z "$at" ] || exit 0
+          [ -n "$HOOK" ] || { echo "::error::X posting looks stalled and there is no webhook"; exit 1; }
+          MSG="**X posting: no post booked for 36 hours** (newest: ${newest:-none})"$'\n'"Check the latest CI run's Buffer step, the BUFFER_TOKEN secret and docs/OPERATIONS.md."
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
+
   # Every alert above and in the other workflows goes through one Discord webhook, and a deleted or mistyped one fails
   # silently. A GET on a live webhook answers 200, so this job fails (and GitHub emails the owner) when the secret is
   # missing or the webhook does not answer 2xx. The URL and the answer (it holds the token) are never printed.
