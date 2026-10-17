@@ -157,7 +157,7 @@ jobs:
         run: |
           [ -n "$HOOK" ] && [ "$(date -u +%H)" -lt 6 ] || exit 0
           fit() { awk -v max="$1" '!cut && n + length($0) + 1 <= max { n += length($0) + 1; print; next } { cut++ } END { if (cut) printf "(%d more line%s cut; the full text is in the run log)\n", cut, (cut == 1 ? "" : "s") }'; }
-          MSG="**Rules watch: Review**"$'\n'"The card data shows something the code may not handle yet (update pipeline rules_watch.py once checked):"$'\n'"$(fit 1500 < rules.txt)"
+          MSG="**Rules watch: Review**"$'\n'"The data shows something that needs a look (a rule the code may not handle: pipeline rules_watch.py; an unnamed share over 20%: data/archetypes/community-<format>.yaml):"$'\n'"$(fit 1500 < rules.txt)"
           curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
       - name: Tell Discord when the check failed
         if: failure()
