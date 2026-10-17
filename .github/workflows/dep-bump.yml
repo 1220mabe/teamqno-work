@@ -1,11 +1,10 @@
 name: Security bump
 
 # Weekly, and on demand: when pnpm audit finds a high or critical advisory in the shipped web packages or the accounts
-# Worker, re-resolve the lockfile to the patched versions (`pnpm audit --fix update`: package.json ranges never change,
-# so only versions inside the declared range move), run the tests, and push the lockfile alone to main. A push is not a
-# deploy: CI tests the new main in full before anything ships, and a failing run keeps serving the last good build.
-# On demand it is a dry run unless "push" is ticked. Nothing here prints source (this repo is public): package names
-# and verdicts only (docs/SECURITY.md, "Security bump").
+# Worker, `pnpm update` moves only the named packages inside their declared ranges; the run stops unless only package.json
+# and the lockfile changed (package.json only by a version raised within the same major), tests, then pushes those files
+# to main. A push is not a deploy: CI tests the new main in full before anything ships. On demand it is a dry run unless
+# "push" is ticked. Nothing here prints source (this repo is public): package names and verdicts only (docs/SECURITY.md).
 on:
   schedule:
     - cron: "10 5 * * 1"
