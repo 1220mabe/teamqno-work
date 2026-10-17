@@ -43,6 +43,7 @@ jobs:
         run: |
           for d in apps/web apps/sync; do
             (cd "$d" && pnpm install --frozen-lockfile --silent)
+            git status --porcelain # paths only: which file the install itself touched
             flags=""; [ "$d" = apps/web ] && flags="--prod"
             (cd "$d" && pnpm audit --audit-level=high $flags --fix update >/dev/null 2>&1) || true
             (cd "$d" && pnpm audit --audit-level=high $flags >/dev/null 2>&1) || echo "::warning::$d still has a high or critical advisory after the bump (a major or a missing patch: bump by hand)"
