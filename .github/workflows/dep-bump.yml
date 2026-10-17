@@ -1,0 +1,92 @@
+name: Security bump
+
+# Weekly, and on demand: when pnpm audit finds a high or critical advisory in the shipped web packages or the accounts
+# Worker, re-resolve the lockfile to the patched versions (`pnpm audit --fix update`: package.json ranges never change,
+# so only versions inside the declared range move), run the tests, and push the lockfile alone to main. A push is not a
+# deploy: CI tests the new main in full before anything ships, and a failing run keeps serving the last good build.
+# On demand it is a dry run unless "push" is ticked. Nothing here prints source (this repo is public): package names
+# and verdicts only (docs/SECURITY.md, "Security bump").
+on:
+  schedule:
+    - cron: "10 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      push:
+        description: "Push the bumped lockfile to main (off: a dry run that only reports)"
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: dep-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          package_json_file: apps/web/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Re-resolve vulnerable packages inside their declared ranges
+        run: |
+          for d in apps/web apps/sync; do
+            (cd "$d" && pnpm install --frozen-lockfile --silent)
+            flags=""; [ "$d" = apps/web ] && flags="--prod"
+            (cd "$d" && pnpm audit --audit-level=high $flags --fix update >/dev/null 2>&1) || true
+            (cd "$d" && pnpm audit --audit-level=high $flags >/dev/null 2>&1) || echo "::warning::$d still has a high or critical advisory after the bump (a major or a missing patch: bump by hand)"
+          done
+          git status --porcelain > changed.txt
+          cat changed.txt
+          if [ ! -s changed.txt ]; then echo "Nothing to bump."; exit 0; fi
+          # Only lockfiles may change; anything else means the fix did something unexpected.
+          if grep -v -E '^ M apps/(web|sync)/pnpm-lock\.yaml$' changed.txt | grep -v '^?? changed.txt$'; then
+            echo "::error::the bump touched more than the lockfiles; stopping"; exit 1
+          fi
+          echo "bumped=1" >> "$GITHUB_ENV"
+      - name: Test the bumped lockfiles
+        if: env.bumped == '1'
+        run: |
+          for d in apps/web apps/sync; do (cd "$d" && pnpm install --frozen-lockfile --silent); done
+          (cd apps/web && node scripts/changelog.mjs >/dev/null 2>&1; ../../scripts/quiet.sh pnpm lint && ../../scripts/quiet.sh pnpm typecheck && ../../scripts/quiet.sh pnpm test)
+          (cd apps/sync && ../../scripts/quiet.sh pnpm test)
+      - name: Push the lockfiles to main
+        if: env.bumped == '1' && (github.event_name == 'schedule' || inputs.push)
+        env:
+          SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
+        run: |
+          git config user.name "security-bump-bot"
+          git config user.email "security-bump-bot@users.noreply.github.com"
+          git add apps/web/pnpm-lock.yaml apps/sync/pnpm-lock.yaml
+          git commit -m "deps: lockfile bumped to patched versions (weekly security bump)"
+          # The read key used for the checkout cannot push. The write key exists only in this step and is deleted at the end.
+          umask 077
+          printf '%s\n' "$SOURCE_WRITE_KEY" > "$RUNNER_TEMP/wkey"
+          trap 'rm -f "$RUNNER_TEMP/wkey"' EXIT
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$RUNNER_TEMP/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/wkey -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o StrictHostKeyChecking=yes"
+          REMOTE=git@github.com:1220mabe/sideboard-sage.git
+          for attempt in 1 2 3; do
+            if git push "$REMOTE" HEAD:main; then exit 0; fi
+            git fetch --depth=1 "$REMOTE" main && git rebase --onto FETCH_HEAD HEAD~1 || exit 1
+          done
+          exit 1
+      - name: Tell Discord when the run failed
+        if: failure()
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          [ -n "$HOOK" ] || exit 0
+          MSG="**Security bump: Failed**"$'\n'"Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
