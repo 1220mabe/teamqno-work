@@ -128,6 +128,13 @@ jobs:
           watch = s.get("rules_watch", [])
           for line in watch:
               print(f"::warning::rules watch: {line}")
+          # The community deck dictionaries age: a new deck is "Other" until its card conditions are added. Above 20% of
+          # a format's decks the owner is told with the rules watch (never a failure; Issue #358).
+          for f in FORMATS:
+              m = json.load(open(f"m-{f}.json"))
+              other = next((a["share"] for a in m["archetypes"] if a["name"] == "Other"), 0)
+              if other > 0.20:
+                  watch.append(f"{f}: {other:.0%} of decks are unnamed (Other); the deck dictionary may be missing a new deck")
           if watch:
               open("rules.txt", "w").write("\n".join(f"- {w}" for w in watch))
           for src in s.get("stale_sources", []):
