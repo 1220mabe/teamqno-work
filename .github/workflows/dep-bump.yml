@@ -39,24 +39,48 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
-      - name: Re-resolve vulnerable packages inside their declared ranges
+      - name: Re-resolve the vulnerable packages inside their declared ranges
         run: |
           # The install changes file modes (not content) on the runner; only content counts here.
           git config core.fileMode false
           for d in apps/web apps/sync; do
             (cd "$d" && pnpm install --frozen-lockfile --silent)
             flags=""; [ "$d" = apps/web ] && flags="--prod"
-            (cd "$d" && pnpm audit --audit-level=high $flags --fix update >/dev/null 2>&1) || true
+            # Only the packages the audit names move (`pnpm audit --fix update` would also raise every other range).
+            (cd "$d" && pnpm audit --audit-level=high $flags --json > "$RUNNER_TEMP/audit.json" 2>/dev/null) || true
+            names=$(jq -r '[.advisories[]? | select(.severity == "high" or .severity == "critical") | .module_name] | unique | .[]' "$RUNNER_TEMP/audit.json" 2>/dev/null | tr '\n' ' ')
+            [ -n "$names" ] || continue
+            echo "bumping in $d: $names"
+            # shellcheck disable=SC2086
+            (cd "$d" && pnpm update --depth Infinity $names >/dev/null 2>&1) || true
             (cd "$d" && pnpm audit --audit-level=high $flags >/dev/null 2>&1) || echo "::warning::$d still has a high or critical advisory after the bump (a major or a missing patch: bump by hand)"
           done
-          git status --porcelain > changed.txt
+          git status --porcelain | grep -v '^?? ' > changed.txt || true
           cat changed.txt
           if [ ! -s changed.txt ]; then echo "Nothing to bump."; exit 0; fi
-          # Only lockfiles may change; anything else means the fix did something unexpected.
-          if grep -v -E '^ M apps/(web|sync)/pnpm-lock\.yaml$' changed.txt | grep -v '^?? changed.txt$'; then
-            git diff --numstat; git diff -U0 -- apps/web/package.json apps/sync/package.json | grep -E '^[+-]' | cut -c1-60
-            echo "::error::the bump touched more than the lockfiles; stopping"; exit 1
+          # Only the lockfiles and package.json may change, and package.json only by raising a version inside the same major.
+          if grep -v -E '^ M apps/(web|sync)/(pnpm-lock\.yaml|package\.json)$' changed.txt; then
+            echo "::error::the bump touched more than the manifests and lockfiles; stopping"; exit 1
           fi
+          python3 - <<'PY'
+          import re, subprocess, sys
+          bad = []
+          for d in ("apps/web", "apps/sync"):
+              out = subprocess.run(["git", "diff", "-U0", "--", d + "/package.json"], capture_output=True, text=True).stdout
+              old, new = {}, {}
+              for line in out.splitlines():
+                  m = re.match(r'^([+-])\s+"([^"]+)":\s*"([^"]+)"', line)
+                  if m and not line.startswith(("+++", "---")):
+                      (old if m[1] == "-" else new)[m[2]] = m[3]
+              for k in set(old) | set(new):
+                  a, b = old.get(k), new.get(k)
+                  major = lambda v: re.sub(r"^[^0-9]*", "", v or "").split(".")[0]
+                  if a is None or b is None or major(a) != major(b):
+                      bad.append(k)
+          if bad:
+              print("::error::package.json changed beyond a same-major bump:", ", ".join(sorted(bad)))
+              sys.exit(1)
+          PY
           echo "bumped=1" >> "$GITHUB_ENV"
       - name: Test the bumped lockfiles
         if: env.bumped == '1'
@@ -71,7 +95,7 @@ jobs:
         run: |
           git config user.name "security-bump-bot"
           git config user.email "security-bump-bot@users.noreply.github.com"
-          git add apps/web/pnpm-lock.yaml apps/sync/pnpm-lock.yaml
+          git add apps/web/pnpm-lock.yaml apps/sync/pnpm-lock.yaml apps/web/package.json apps/sync/package.json
           git commit -m "deps: lockfile bumped to patched versions (weekly security bump)"
           # The read key used for the checkout cannot push. The write key exists only in this step and is deleted at the end.
           umask 077
