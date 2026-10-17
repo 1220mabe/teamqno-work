@@ -54,6 +54,7 @@ jobs:
           if [ ! -s changed.txt ]; then echo "Nothing to bump."; exit 0; fi
           # Only lockfiles may change; anything else means the fix did something unexpected.
           if grep -v -E '^ M apps/(web|sync)/pnpm-lock\.yaml$' changed.txt | grep -v '^?? changed.txt$'; then
+            git diff --numstat; git diff -U0 -- apps/web/package.json apps/sync/package.json | grep -E '^[+-]' | cut -c1-60
             echo "::error::the bump touched more than the lockfiles; stopping"; exit 1
           fi
           echo "bumped=1" >> "$GITHUB_ENV"
