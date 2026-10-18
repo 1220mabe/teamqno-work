@@ -1,0 +1,91 @@
+name: Daily column
+
+# Daily, before the two-hourly build: write one column from the newest day's data when an angle passes its
+# evidence floor and every gate (Issue #364, docs/OPERATIONS.md). A quiet day writes nothing and the job still succeeds.
+# It commits only the column's files; the next scheduled build ships them, so this job can never block a deploy.
+on:
+  schedule:
+    - cron: "40 2 * * *"
+  workflow_dispatch:
+
+permissions: {} # the checkout and the push use the deploy key; nothing here needs the workflow token
+
+concurrency:
+  group: daily-column
+  cancel-in-progress: false
+
+jobs:
+  column:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      - name: Write the column (fetches the recent days first; a failed source only means fewer events)
+        id: column
+        working-directory: pipeline
+        env:
+          TOPDECK_API_KEY: ${{ secrets.TOPDECK_API_KEY }}
+          SPICERACK_API_KEY: ${{ secrets.SPICERACK_API_KEY }}
+        run: |
+          uv sync --locked
+          uv run python -m sideboard_sage_pipeline cards
+          uv run python -m sideboard_sage_pipeline daily-column --fetch | tee "$RUNNER_TEMP/column.log"
+          slug=$(sed -n 's/^daily-column: wrote \([a-z0-9-]*\) .*/\1/p' "$RUNNER_TEMP/column.log")
+          echo "slug=$slug" >> "$GITHUB_OUTPUT"
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        if: steps.column.outputs.slug != ''
+        with:
+          package_json_file: apps/web/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        if: steps.column.outputs.slug != ''
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - name: Check the column against the writing and figure tests, and draw its thumbnails; drop it on any failure
+        if: steps.column.outputs.slug != ''
+        continue-on-error: true
+        working-directory: apps/web
+        env:
+          SLUG: ${{ steps.column.outputs.slug }}
+        run: |
+          drop() { rm -f "content/articles/$SLUG.md" "content/articles/$SLUG.ja.md" public/media/"$SLUG".png public/media/"$SLUG".ja.png "public/media/fig-$SLUG.svg"; git checkout -- content/articles/card-images.json; echo "::warning::daily column $SLUG dropped: $1"; }
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm install --frozen-lockfile || { drop "install failed"; exit 0; }
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec vitest run src/lib/columnVoice.test.ts src/lib/columnGates.test.ts src/lib/articles.test.ts || { drop "a column test failed"; exit 0; }
+          # The drawn thumbnail needs a browser and Scryfall; when either fails the generic image written by the generator stays.
+          (bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec playwright install --with-deps chromium && node scripts/column-thumbs.mjs "$SLUG") || echo "::warning::column thumbnails not drawn; the generic image stands in"
+      - name: Commit the column when it survived the checks
+        env:
+          SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
+        run: |
+          git config user.name "calibration-bot"
+          git config user.email "calibration-bot@users.noreply.github.com"
+          git add -A apps/web/content/articles apps/web/public/media
+          if ! git diff --cached --quiet; then
+            git commit -m "data: daily column"
+            umask 077
+            printf '%s\n' "$SOURCE_WRITE_KEY" > "$RUNNER_TEMP/wkey"
+            trap 'rm -f "$RUNNER_TEMP/wkey"' EXIT
+            echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$RUNNER_TEMP/known_hosts"
+            export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/wkey -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o StrictHostKeyChecking=yes"
+            REMOTE=git@github.com:1220mabe/sideboard-sage.git
+            for attempt in 1 2 3 4; do
+              if git push "$REMOTE" HEAD:main; then rm -f "$RUNNER_TEMP/wkey"; exit 0; fi
+              git fetch --depth=1 "$REMOTE" main && git rebase --onto FETCH_HEAD HEAD~1 || exit 1
+            done
+            rm -f "$RUNNER_TEMP/wkey"
+            exit 1
+          fi
+      - name: Tell Discord when the run failed
+        if: failure()
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          [ -n "$HOOK" ] || exit 0
+          MSG="**Daily column: Failed**"$'\n'"Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
