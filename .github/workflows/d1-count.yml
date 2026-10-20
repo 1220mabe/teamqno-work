@@ -33,7 +33,10 @@ jobs:
             apps/sync/wrangler.toml
             apps/sync/src/clickReport.ts
             apps/sync/scripts/click-report.mjs
+            apps/sync/src/demandReport.ts
+            apps/sync/scripts/demand-report.mjs
             apps/web/src/lib/buyKeys.ts
+            apps/web/src/lib/demandKey.ts
             apps/web/src/lib/discordFormat.ts
           sparse-checkout-cone-mode: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -79,6 +82,18 @@ jobs:
           # No clicks table yet (schema not applied) or no counts: one line saying so, never a failure.
           out=$(npx --yes wrangler@4.146.0 d1 execute sideboard-sage-sync --remote --json --command "SELECT day, surface, shop, n FROM clicks WHERE day >= date('now', '-56 days')" 2>/dev/null) || out='[{"results":[]}]'
           msg=$(printf '%s' "$out" | node --no-warnings scripts/click-report.mjs) || exit 0
+          echo "$msg"
+          [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
+      - name: Demand
+        working-directory: apps/sync
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.D1_BACKUP_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          # Issue #427: top cards and decks looked at (last 7 days against the 7 before), from the click counter's demand rows. No rows or no table: one line saying so, never a failure.
+          out=$(npx --yes wrangler@4.146.0 d1 execute sideboard-sage-sync --remote --json --command "SELECT day, surface, shop, n FROM clicks WHERE day >= date('now', '-13 days') AND (surface = 'demand' OR (surface = '*' AND shop = 'demand'))" 2>/dev/null) || out='[{"results":[]}]'
+          msg=$(printf '%s' "$out" | node --no-warnings scripts/demand-report.mjs) || exit 0
           echo "$msg"
           [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
       - name: Tell Discord when the run failed
