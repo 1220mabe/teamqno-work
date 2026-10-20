@@ -430,6 +430,12 @@ jobs:
           for f in $(uv run python -m sideboard_sage_pipeline.formats); do
             curl -fsS --max-time 20 --retry 2 "https://sideboard-sage.pages.dev/api/v1/news/$f.json" -o "../apps/web/public/api/v1/news/$f.json" || rm -f "../apps/web/public/api/v1/news/$f.json"
           done
+          # Each format's price history as it is live now (Issue #425): today's point is added to it. A format with no file
+          # yet (404) starts its history today; the pipeline ignores anything that is not a history file.
+          mkdir -p data/prices-before
+          for f in $(uv run python -m sideboard_sage_pipeline.formats); do
+            curl -fsS --max-time 20 --retry 3 "https://sideboard-sage.pages.dev/api/v1/prices/$f-history.json" -o "data/prices-before/$f-history.json" || rm -f "data/prices-before/$f-history.json"
+          done
           uv run python -m sideboard_sage_pipeline cards
           # Card names per language: one search each, cached in pipeline/data for a week; a failure keeps the cached copy.
           uv run python -m sideboard_sage_pipeline names
