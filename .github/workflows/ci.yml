@@ -440,6 +440,8 @@ jobs:
           # Pictures for list cards in no format's card file (a set newer than the bulk file), via /cards/collection;
           # only asks when something is missing, and a failure only means card backs in the share images (Issue #249).
           uv run python -m sideboard_sage_pipeline unlisted-art || echo "unlisted art: skipped"
+          # Token pictures for the playtest table, via /cards/collection; a failure only means the text frame (Issue #384).
+          uv run python -m sideboard_sage_pipeline token-art || echo "token art: skipped"
       # Pre-publish gate (#135) with quarantine: data that fails it (exit 1) is not published. The run ships its code with the
       # last good data (the newest `api-good-` copy, saved below only after a pass) and still ends green, so nothing wedges.
       # With no copy, or one the code cannot read (pipeline quarantine.py), this run's data ships as before and the alert says so.
