@@ -625,9 +625,8 @@ jobs:
       # Every internal link on the built pages must land on a page (a finish pointing at an event page that was never
       # written is invisible to unit tests). Warns first; turn on `--max 0` as a hard stop once a run has shown it clean.
       - name: Check the internal links
-        continue-on-error: true
         working-directory: repo/apps/web
-        run: node scripts/internal-links.mjs --site "$GITHUB_WORKSPACE/out" --max 0 || echo "::warning::internal links point at pages that were not written (list above)"
+        run: node scripts/internal-links.mjs --site "$GITHUB_WORKSPACE/out" --max 0
       - name: Count the files (Cloudflare Pages allows 20,000)
         working-directory: repo/apps/web
         run: node scripts/budget.mjs --files --site "$GITHUB_WORKSPACE/out"
