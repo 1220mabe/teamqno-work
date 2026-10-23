@@ -199,7 +199,7 @@ jobs:
         with:
           node-version: 24
       - name: Partner link clicks from the counter (monthly totals only; Issue #316)
-        # Same read token as runner/d1-count.yml. Only "partner:<id>" rows summed per month, and the days that hit the
+        # Same read token as runner/d1-count.yml. Only "partner:<id>" rows summed per month and page type, and the days that hit the
         # daily cap (5000, apps/sync/src/clicks.ts DEFAULT_DAILY_CAP): no visitor data exists to read. A failed read leaves
         # the file out, and the report then says "not measured", never 0.
         if: ${{ vars.D1_COUNT_ENABLED == 'true' && github.event.schedule != '20 3 * * 4' }}
@@ -210,7 +210,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           q() { npx --yes wrangler@4.146.0 d1 execute sideboard-sage-sync --remote --json --command "$1" 2>/dev/null; }
-          p=$(q "SELECT substr(day, 1, 7) AS month, shop, SUM(n) AS n, MIN(day) AS first FROM clicks WHERE shop LIKE 'partner:%' GROUP BY month, shop") || exit 0
+          p=$(q "SELECT substr(day, 1, 7) AS month, shop, surface, SUM(n) AS n, MIN(day) AS first FROM clicks WHERE shop LIKE 'partner:%' GROUP BY month, shop, surface") || exit 0
           c=$(q "SELECT substr(day, 1, 7) AS month, COUNT(*) AS days FROM clicks WHERE surface = '*' AND shop = '*' AND n > 5000 GROUP BY month") || exit 0
           jq -n --argjson p "$p" --argjson c "$c" '{partners: $p[0].results, capped: $c[0].results}' > "$RUNNER_TEMP/partner-clicks.json" || rm -f "$RUNNER_TEMP/partner-clicks.json"
       - name: Partner value report (each partner's closed months, written once; Issue #313)
