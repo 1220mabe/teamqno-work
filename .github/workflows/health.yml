@@ -48,6 +48,7 @@ jobs:
           fj = json.load(open("formats.json"))
           FORMATS = fj["formats"]
           PAPER_ONLY = set(FORMATS) - set(fj["mtgo"])  # no MTGO event types to check
+          WARN_ONLY = set(fj.get("mtgo_warn", []))  # a stale Challenge only warns (pipeline formats.MTGO_WARN_ONLY)
           for f in FORMATS:
               m = json.load(open(f"m-{f}.json"))
               age = now - datetime.fromisoformat(m["generated_at"])
@@ -120,7 +121,7 @@ jobs:
                       continue
                   missing = "any day in the window" if day is None else (expected or (datetime.fromisoformat(day) + timedelta(days=1)).date()).isoformat()
                   line = f"{f} {kind}: newest {day or 'none'}, missing {missing} (limit {limit} days if no usual weekday)"
-                  if fails:
+                  if fails and f not in WARN_ONLY:
                       problems.append(line)
                   else:
                       print(f"::warning::{line}")
