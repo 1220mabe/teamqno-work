@@ -54,7 +54,7 @@ jobs:
         env:
           SLUG: ${{ steps.column.outputs.slug }}
         run: |
-          drop() { rm -f "content/articles/$SLUG.md" "content/articles/$SLUG.ja.md" public/media/"$SLUG".png public/media/"$SLUG".ja.png "public/media/fig-$SLUG.svg"; git checkout -- content/articles/card-images.json; echo "::warning::daily column $SLUG dropped: $1"; }
+          drop() { rm -f "content/articles/$SLUG.md" "content/articles/$SLUG.ja.md" "content/articles/$SLUG.trace.json" public/media/"$SLUG".png public/media/"$SLUG".ja.png "public/media/fig-$SLUG.svg"; git checkout -- content/articles/card-images.json; echo "::warning::daily column $SLUG dropped: $1"; }
           bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm install --frozen-lockfile || { drop "install failed"; exit 0; }
           bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec vitest run src/lib/columnVoice.test.ts src/lib/columnGates.test.ts src/lib/articles.test.ts || { drop "a column test failed"; exit 0; }
           # The drawn thumbnail needs a browser and Scryfall; when either fails the generic image written by the generator stays.
