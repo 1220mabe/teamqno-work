@@ -622,6 +622,11 @@ jobs:
         continue-on-error: true
         working-directory: repo/apps/web
         run: pnpm matrix-image --site "$GITHUB_WORKSPACE/out"
+      # The Limited set report's pictures (Issue #445): only for a set whose data reached day 7 or 21, or that just closed. Never blocks the deploy.
+      - name: Draw the Limited set report pictures
+        continue-on-error: true
+        working-directory: repo/apps/web
+        run: pnpm limited-image --site "$GITHUB_WORKSPACE/out" --cache "$GITHUB_WORKSPACE/og-cache"
       # Every internal link on the built pages must land on a page (a finish pointing at an event page that was never
       # written is invisible to unit tests). Warns first; turn on `--max 0` as a hard stop once a run has shown it clean.
       - name: Check the internal links
