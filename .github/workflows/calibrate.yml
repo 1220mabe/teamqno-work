@@ -140,6 +140,12 @@ jobs:
         timeout-minutes: 20
         working-directory: pipeline
         run: uv run python -m sideboard_sage_pipeline limited17
+      - name: 17Lands draft file of one set per week (Issue #445; picks per card, a failure keeps the last file)
+        if: github.event.schedule != '20 3 * * 4'
+        continue-on-error: true
+        timeout-minutes: 20
+        working-directory: pipeline
+        run: uv run python -m sideboard_sage_pipeline limited17-draft
       - name: Warn if the history folder grows large
         if: github.event.schedule != '20 3 * * 4'
         run: |
