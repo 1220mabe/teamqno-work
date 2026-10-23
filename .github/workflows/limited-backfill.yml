@@ -1,0 +1,79 @@
+name: Limited archive
+
+# Daily: archive closed 17Lands sets as per-card counts in history/limited (written once, checksummed in
+# history/manifest.json), at most a few game files per run, five seconds apart. A no-op (one small index read) once
+# every closed set is archived. It commits only history/limited and history/manifest.json; the daily build only reads
+# them, so this job can never block a deploy. Scheduled away from Calibrate (Monday 03:20), which also writes the
+# manifest. See docs/DEPLOY.md, History.
+on:
+  schedule:
+    - cron: "35 10 * * *"
+  workflow_dispatch:
+    inputs:
+      max_files:
+        description: "Game files to read this run (default 4)"
+        required: false
+        default: ""
+
+permissions: {} # the checkout and the push use the deploy key; nothing here needs the workflow token
+
+concurrency:
+  group: limited-archive
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      - name: Archive closed 17Lands sets (draft and sealed game files)
+        working-directory: pipeline
+        env:
+          MAX_FILES: ${{ github.event.inputs.max_files }}
+        run: |
+          uv sync --locked -q
+          # The log is public and the code is private: print only the job's own lines (set codes and counts), never a
+          # stack trace.
+          log="$RUNNER_TEMP/archive.log"
+          rc=0
+          uv run python -m sideboard_sage_pipeline limited17-backfill ${MAX_FILES:+--max-files "$MAX_FILES"} >"$log" 2>&1 || rc=$?
+          grep -E '^17lands' "$log" | cut -c1-200 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          [ "$rc" -eq 0 ] || { echo "FAILED (exit $rc): limited17-backfill"; exit "$rc"; }
+      - name: Commit new shards
+        env:
+          SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
+        run: |
+          git config user.name "calibration-bot"
+          git config user.email "calibration-bot@users.noreply.github.com"
+          git add -A history/limited history/manifest.json 2>/dev/null || git add history/manifest.json
+          if git diff --cached --quiet; then echo "nothing new"; exit 0; fi
+          git commit -q -m "data: archive closed 17Lands sets in history/limited"
+          # The read key used for the checkout cannot push. The write key exists only in this step and is deleted at the end.
+          umask 077
+          printf '%s\n' "$SOURCE_WRITE_KEY" > "$RUNNER_TEMP/wkey"
+          trap 'rm -f "$RUNNER_TEMP/wkey"' EXIT # the key never outlives this step, even on a failed push
+          # GitHub's published ed25519 host key, pinned instead of trusting the first answer.
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$RUNNER_TEMP/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/wkey -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o StrictHostKeyChecking=yes"
+          REMOTE=git@github.com:1220mabe/sideboard-sage.git
+          # A push to main during the run rejects ours: replay the one commit on the newest main and retry.
+          for attempt in 1 2 3 4; do
+            if git push -q "$REMOTE" HEAD:main; then rm -f "$RUNNER_TEMP/wkey"; exit 0; fi
+            git fetch -q --depth=1 "$REMOTE" main && git rebase -q --onto FETCH_HEAD HEAD~1 || exit 1
+          done
+          rm -f "$RUNNER_TEMP/wkey"
+          exit 1
+      - name: Tell Discord when the run failed
+        if: failure()
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          [ -n "$HOOK" ] || exit 0
+          MSG="**Limited archive: Failed**"$'\n'"Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
