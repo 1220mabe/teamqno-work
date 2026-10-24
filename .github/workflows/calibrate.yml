@@ -119,6 +119,11 @@ jobs:
         working-directory: pipeline
         continue-on-error: true
         run: uv run python -m sideboard_sage_pipeline main-eval
+      - name: Score the Cut line's chance on new paper events (Issue #328; forward check, the switch the page reads)
+        if: github.event.schedule != '20 3 * * 4'
+        working-directory: pipeline
+        continue-on-error: true
+        run: uv run python -m sideboard_sage_pipeline cut-eval --forward --status ../apps/web/src/data/cut-forward.json > /dev/null
       - name: Re-run the 14-day share forecast test on the last 6 closed months (Issue #281; appends to data/answers_scoreboard.json, ships nothing)
         if: github.event.schedule != '20 3 * * 4'
         working-directory: pipeline
@@ -225,7 +230,7 @@ jobs:
         run: |
           git config user.name "calibration-bot"
           git config user.email "calibration-bot@users.noreply.github.com"
-          git add -A history data/calibration.json data/sns_findings.json data/sns_side.json data/board_eval.json data/main_eval.json data/archetypes $(ls -d data/models data/answers_scoreboard.json data/names_coverage.json data/sources_candidates.json data/partners data/limited 2>/dev/null)
+          git add -A history data/calibration.json data/sns_findings.json data/sns_side.json data/board_eval.json data/main_eval.json apps/web/src/data/cut-forward.json data/archetypes $(ls -d data/models data/answers_scoreboard.json data/names_coverage.json data/sources_candidates.json data/partners data/limited 2>/dev/null)
           # The analyst column, only when it survived the checks above (its files are gone otherwise).
           git add -A apps/web/content/articles apps/web/public/media
           if ! git diff --cached --quiet; then
