@@ -1,0 +1,75 @@
+name: Hareruya live
+
+# Twice a day: read new Hareruya deck pages and result pages (at most 300 requests a run, 6 s or more apart, each page
+# once, the recent window only; rules in docs/LEGAL_AND_ASSETS.md, Hareruya row) and commit the small store in
+# data/hareruya. The deploy that runs every two hours reads that store and makes no Hareruya request, so this job (about
+# 30 minutes when there is work) can never slow or block a deploy. A 403, 429, captcha or bot check ends the run with no
+# retry; the store records it and the deploy flags the source stale. Timed to finish, normally, before the 02:20 and
+# 14:20 deploys (a longer run is picked up by the next one).
+# See docs/DEPLOY.md, Per-source fallback.
+on:
+  schedule:
+    - cron: "45 1,13 * * *"
+  workflow_dispatch:
+
+permissions: {} # the checkout and the push use the deploy key; nothing here needs the workflow token
+
+concurrency:
+  group: hareruya-live
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      - name: Read new Hareruya pages (a refusal keeps the last store)
+        working-directory: pipeline
+        run: |
+          uv sync --locked -q
+          # The log is public and the code is private: print only the job's own lines (counts and event names, never a
+          # player name), never a stack trace.
+          log="$RUNNER_TEMP/live.log"
+          rc=0
+          uv run python -m sideboard_sage_pipeline hareruya-live >"$log" 2>&1 || rc=$?
+          grep -E '^Hareruya' "$log" | cut -c1-200 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          [ "$rc" -eq 0 ] || { echo "FAILED (exit $rc): hareruya-live"; exit "$rc"; }
+      - name: Commit the store
+        env:
+          SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
+        run: |
+          git config user.name "calibration-bot"
+          git config user.email "calibration-bot@users.noreply.github.com"
+          [ -d data/hareruya ] || { echo "nothing new"; exit 0; } # not permitted, or nothing read yet
+          git add -A data/hareruya
+          if git diff --cached --quiet; then echo "nothing new"; exit 0; fi
+          git commit -q -m "data: refresh the Hareruya store"
+          # The read key used for the checkout cannot push. The write key exists only in this step and is deleted at the end.
+          umask 077
+          printf '%s\n' "$SOURCE_WRITE_KEY" > "$RUNNER_TEMP/wkey"
+          trap 'rm -f "$RUNNER_TEMP/wkey"' EXIT # the key never outlives this step, even on a failed push
+          # GitHub's published ed25519 host key, pinned instead of trusting the first answer.
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$RUNNER_TEMP/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/wkey -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o StrictHostKeyChecking=yes"
+          REMOTE=git@github.com:1220mabe/sideboard-sage.git
+          # A push to main during the run rejects ours: replay the one commit on the newest main and retry.
+          for attempt in 1 2 3 4; do
+            if git push -q "$REMOTE" HEAD:main; then rm -f "$RUNNER_TEMP/wkey"; exit 0; fi
+            git fetch -q --depth=1 "$REMOTE" main && git rebase -q --onto FETCH_HEAD HEAD~1 || exit 1
+          done
+          rm -f "$RUNNER_TEMP/wkey"
+          exit 1
+      - name: Tell Discord when the run failed
+        if: failure()
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          [ -n "$HOOK" ] || exit 0
+          MSG="**Hareruya live: Failed**"$'\n'"Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
