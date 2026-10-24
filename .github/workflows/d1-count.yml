@@ -37,6 +37,9 @@ jobs:
             apps/sync/scripts/demand-report.mjs
             apps/web/src/lib/buyKeys.ts
             apps/web/src/lib/demandKey.ts
+            apps/web/src/lib/partnerKey.ts
+            apps/web/src/lib/surfaceViews.ts
+            data/metrics/surface-views.json
             apps/web/src/lib/discordFormat.ts
           sparse-checkout-cone-mode: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -81,7 +84,8 @@ jobs:
         run: |
           # No clicks table yet (schema not applied) or no counts: one line saying so, never a failure.
           out=$(npx --yes wrangler@4.146.0 d1 execute sideboard-sage-sync --remote --json --command "SELECT day, surface, shop, n FROM clicks WHERE day >= date('now', '-56 days')" 2>/dev/null) || out='[{"results":[]}]'
-          msg=$(printf '%s' "$out" | node --no-warnings scripts/click-report.mjs) || exit 0
+          # Page loads per page type (nightly rollup, Issue #460) give the rate per 1,000 loads; a missing file reads as "not measured".
+          msg=$(printf '%s' "$out" | node --no-warnings scripts/click-report.mjs 5000 ../../data/metrics/surface-views.json) || exit 0
           echo "$msg"
           [ -n "$HOOK" ] && curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$msg" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
       - name: Demand
