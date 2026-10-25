@@ -20,7 +20,7 @@ jobs:
         run: |
           # The public domain answers 403 to the runner (bot rules), so the full probe goes to the pages.dev copy of the
           # same deploy. The domain itself is checked once: 200 or 403 means it answers; no answer or a 5xx is a problem.
-          DOMAIN_CODE=$(curl -sS -L --retry 3 --retry-delay 10 --max-time 20 -o /dev/null -w '%{http_code}' https://teamqno.work/ || true)
+          DOMAIN_CODE=$(curl -sS -L -A 'Team Qno health (+https://teamqno.work)' --retry 3 --retry-delay 10 --max-time 20 -o /dev/null -w '%{http_code}' https://teamqno.work/ || true)
           export DOMAIN_CODE
           base="https://sideboard-sage.pages.dev"
           curl -fsS --retry 3 --retry-delay 10 -o /dev/null "$base/"
