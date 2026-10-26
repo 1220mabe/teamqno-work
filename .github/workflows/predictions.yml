@@ -3,11 +3,13 @@ name: Predictions
 # Weekly, Monday: save the week's riser and 75 calls before the week happens (Issue #483), one file per format in
 # history/predictions/<YYYY-Www>/<format>.json, written once and checksummed in history/predictions/manifest.json, no
 # player names. It reads the metagame files the site serves (so the call is what visitors saw) after CI's 02:20 run and
-# before Calibrate (03:20). It commits only history/predictions; nothing in ci.yml reads it, so it can never block a
-# deploy, and the save itself never fails (a missing or stale file skips that format with a warning); only a broken
-# setup (uv, the checkout) fails the job, which skips the commit and tells Discord. A manual run
-# saves only the formats the scheduled run did not (an existing file is never replaced). See docs/DEPLOY.md, History,
-# and docs/ALGORITHM.md, "Weekly graded predictions".
+# before Calibrate (03:20). The same files then score every call whose week is over (`predictions-score`): one
+# <format>-scored.json each, written once in the same manifest and never re-scored, and the running totals in
+# data/predictions.json. It commits only those; nothing in ci.yml reads them, so it can never block a deploy, and the
+# save and the score never fail (a missing or stale file skips that format with a warning); only a broken setup (uv,
+# the checkout) fails the job, which skips the commit and tells Discord. A manual run saves only the formats the
+# scheduled run did not (an existing file is never replaced). See docs/DEPLOY.md, History, and docs/ALGORITHM.md,
+# "Weekly graded predictions".
 on:
   schedule:
     - cron: "5 3 * * 1"
@@ -45,7 +47,15 @@ jobs:
           log="$RUNNER_TEMP/save.log"
           uv run python -m sideboard_sage_pipeline predictions-save --metagame "$RUNNER_TEMP/meta" --trigger "$TRIGGER" >"$log" 2>&1 || echo "predictions: the save stopped early"
           grep -E '^predictions' "$log" | cut -c1-200 | tee -a "$GITHUB_STEP_SUMMARY" || true
-      - name: Commit the new calls
+      - name: Score the calls whose week is over
+        working-directory: pipeline
+        env:
+          TRIGGER: ${{ github.event_name == 'workflow_dispatch' && 'manual' || 'schedule' }}
+        run: |
+          log="$RUNNER_TEMP/score.log"
+          uv run python -m sideboard_sage_pipeline predictions-score --metagame "$RUNNER_TEMP/meta" --trigger "$TRIGGER" >"$log" 2>&1 || echo "predictions: the score stopped early"
+          grep -E '^predictions' "$log" | cut -c1-200 | tee -a "$GITHUB_STEP_SUMMARY" || true
+      - name: Commit the new calls and scores
         env:
           SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
         run: |
@@ -53,8 +63,9 @@ jobs:
           git config user.email "calibration-bot@users.noreply.github.com"
           find history/predictions -name '*.tmp' -delete 2>/dev/null || true # a crashed atomic write is never committed
           git add -A history/predictions 2>/dev/null || true
+          git add data/predictions.json 2>/dev/null || true # its own add: a missing file must not drop the scores above
           if git diff --cached --quiet; then echo "nothing new"; exit 0; fi
-          git commit -q -m "data: save this week's prediction calls in history/predictions"
+          git commit -q -m "data: this week's prediction calls and scores in history/predictions"
           # The read key used for the checkout cannot push. The write key exists only in this step and is deleted at the end.
           umask 077
           printf '%s\n' "$SOURCE_WRITE_KEY" > "$RUNNER_TEMP/wkey"
@@ -76,5 +87,5 @@ jobs:
           HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           [ -n "$HOOK" ] || exit 0
-          MSG="**Predictions: Failed** (this week's calls may not be saved; a manual run saves the formats still missing)"$'\n'"Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          MSG="**Predictions: Failed** (this week's calls may not be saved or scored; a manual run saves the formats still missing and scores what is due)"$'\n'"Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
