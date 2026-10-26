@@ -63,6 +63,12 @@ jobs:
           uv run python -m sideboard_sage_pipeline predictions-score --metagame "$RUNNER_TEMP/meta" --tournaments "$tour" --need 2>/dev/null | grep -E '^[a-z]+/events/[0-9]+\.json$' | while read -r p; do
             curl -fsS --max-time 30 --retry 3 "https://sideboard-sage.pages.dev/api/v1/tournaments/$p" -o "$tour/$p" || rm -f "$tour/$p"
           done || true
+          # Shard files carry no build stamp: the index is fetched again after them, so a deploy that landed while they
+          # were downloading shows as another build than the metagame file's and freezes nothing.
+          for f in $(uv run python -m sideboard_sage_pipeline.formats); do
+            [ -f "$tour/$f/index.json" ] || continue
+            curl -fsS --max-time 30 --retry 3 "https://sideboard-sage.pages.dev/api/v1/tournaments/$f/index.json" -o "$tour/$f/index.json" || rm -f "$tour/$f/index.json"
+          done
           log="$RUNNER_TEMP/score.log"
           uv run python -m sideboard_sage_pipeline predictions-score --metagame "$RUNNER_TEMP/meta" --tournaments "$tour" --trigger "$TRIGGER" >"$log" 2>&1 || echo "predictions: the score stopped early"
           grep -E '^predictions' "$log" | cut -c1-200 | tee -a "$GITHUB_STEP_SUMMARY" || true
