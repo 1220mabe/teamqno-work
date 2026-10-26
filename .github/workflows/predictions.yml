@@ -5,7 +5,8 @@ name: Predictions
 # player names. It reads the metagame files the site serves (so the call is what visitors saw) after CI's 02:20 run and
 # before Calibrate (03:20). The same files then score every call whose week is over (`predictions-score`): one
 # <format>-scored.json each, written once in the same manifest and never re-scored, and the running totals in
-# data/predictions.json. It commits only those; nothing in ci.yml reads them, so it can never block a deploy, and the
+# data/predictions.json. At the same run it freezes the 75's outcome lists once from the served event pages of the same
+# build (<format>-outcome.json.gz), and writes the 75 score (<format>-scored-75.json) once its minimums are fixed. It commits only those; nothing in ci.yml reads them, so it can never block a deploy, and the
 # save and the score never fail (a missing or stale file skips that format with a warning); only a broken setup (uv,
 # the checkout) fails the job, which skips the commit and tells Discord. A manual run saves only the formats the
 # scheduled run did not (an existing file is never replaced). See docs/DEPLOY.md, History, and docs/ALGORITHM.md,
@@ -52,8 +53,18 @@ jobs:
         env:
           TRIGGER: ${{ github.event_name == 'workflow_dispatch' && 'manual' || 'schedule' }}
         run: |
+          # The 75's outcome lists come from the event pages of the same build (ALGORITHM.md, amendment of 2026-10-26):
+          # each format's index, then only the event shards the due calls need. A failed download freezes nothing.
+          tour="$RUNNER_TEMP/tour"
+          for f in $(uv run python -m sideboard_sage_pipeline.formats); do
+            mkdir -p "$tour/$f/events"
+            curl -fsS --max-time 30 --retry 3 "https://sideboard-sage.pages.dev/api/v1/tournaments/$f/index.json" -o "$tour/$f/index.json" || rm -f "$tour/$f/index.json"
+          done
+          uv run python -m sideboard_sage_pipeline predictions-score --metagame "$RUNNER_TEMP/meta" --tournaments "$tour" --need 2>/dev/null | grep -E '^[a-z]+/events/[0-9]+\.json$' | while read -r p; do
+            curl -fsS --max-time 30 --retry 3 "https://sideboard-sage.pages.dev/api/v1/tournaments/$p" -o "$tour/$p" || rm -f "$tour/$p"
+          done || true
           log="$RUNNER_TEMP/score.log"
-          uv run python -m sideboard_sage_pipeline predictions-score --metagame "$RUNNER_TEMP/meta" --trigger "$TRIGGER" >"$log" 2>&1 || echo "predictions: the score stopped early"
+          uv run python -m sideboard_sage_pipeline predictions-score --metagame "$RUNNER_TEMP/meta" --tournaments "$tour" --trigger "$TRIGGER" >"$log" 2>&1 || echo "predictions: the score stopped early"
           grep -E '^predictions' "$log" | cut -c1-200 | tee -a "$GITHUB_STEP_SUMMARY" || true
       - name: Commit the new calls and scores
         env:
