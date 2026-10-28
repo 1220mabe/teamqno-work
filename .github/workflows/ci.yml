@@ -375,6 +375,8 @@ jobs:
     needs: [ref]
     if: ${{ vars.DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
+    # Recent runs took 25 s to 12 min; a stuck run must not hold the runner for GitHub's 6 h default.
+    timeout-minutes: 30
     env:
       COMMIT: ${{ needs.ref.outputs.sha }}
       API_ARTIFACT: api
