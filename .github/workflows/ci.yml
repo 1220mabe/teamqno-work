@@ -592,12 +592,16 @@ jobs:
           node-version: 24
           cache: pnpm
           cache-dependency-path: repo/apps/web/pnpm-lock.yaml
-      # Each run saves the images it used; unchanged ones are copied, not drawn again.
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      # Unchanged images are copied, not drawn again. A run saves the cache only when its file list changed (names are
+      # content keys), so runs that drew nothing new add no ~180 MB entry to the 10 GB Actions cache.
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: og-cache
           key: og-${{ env.RUN_KEY }}
           restore-keys: og-
+      - name: List the restored images
+        id: og_before
+        run: echo "list=$(mkdir -p og-cache && find og-cache -type f | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
       - name: Install the page writer
         working-directory: repo/apps/web
         run: pnpm install --frozen-lockfile
@@ -627,11 +631,24 @@ jobs:
         continue-on-error: true
         working-directory: repo/apps/web
         run: pnpm limited-image --site "$GITHUB_WORKSPACE/out" --cache "$GITHUB_WORKSPACE/og-cache"
+      - name: List the images to keep
+        id: og_after
+        run: echo "list=$(find og-cache -type f | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - if: ${{ steps.og_after.outputs.list != steps.og_before.outputs.list }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: og-cache
+          key: og-${{ env.RUN_KEY }}
       # Every internal link on the built pages must land on a page (a finish pointing at an event page that was never
       # written is invisible to unit tests). Warns first; turn on `--max 0` as a hard stop once a run has shown it clean.
       - name: Check the internal links
         working-directory: repo/apps/web
         run: node scripts/internal-links.mjs --site "$GITHUB_WORKSPACE/out" --max 0
+      # Issue #493: each sitemap.xml page should be linked from two other built pages in their static HTML. Warnings only.
+      - name: Count the links into the sitemap pages
+        continue-on-error: true
+        working-directory: repo/apps/web
+        run: node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/seo-audit.mjs "$GITHUB_WORKSPACE/out" --inbound
       - name: Count the files (Cloudflare Pages allows 20,000)
         working-directory: repo/apps/web
         run: node scripts/budget.mjs --files --site "$GITHUB_WORKSPACE/out"
