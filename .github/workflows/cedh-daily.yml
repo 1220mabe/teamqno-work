@@ -1,0 +1,88 @@
+name: cEDH daily
+
+# Once a day: ask TopDeck.gg for the recent EDH events (`cedh`, about 7 requests over the last 45 days, 15 s or more
+# apart, the same client and credit as the other formats; rules in docs/LEGAL_AND_ASSETS.md, "cEDH sources"), re-run
+# the pre-registered cEDH backtests on the stored events (`cedh-eval`, no network) and commit data/cedh only. The
+# deploy reads those files and makes no EDH request, so this job can never slow or block a deploy. 12:50 UTC: US
+# evening events have finished (about 04:00 to 07:00 UTC), and the commit lands before the 14:20 deploy that also
+# carries Hareruya live's 13:45 commit, so the daily refresh adds no Pages build. A TopDeck.gg failure fails the job
+# (Discord message) and commits nothing, so the stored events and the last good files stay.
+# Shares a concurrency group with Calibrate, so the two never run at the same time.
+# See docs/DEPLOY.md, Per-source fallback.
+on:
+  schedule:
+    - cron: "50 12 * * *"
+  workflow_dispatch:
+
+permissions: {} # the checkout and the push use the deploy key; nothing here needs the workflow token
+
+concurrency:
+  group: calibrate-cedh
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: 1220mabe/sideboard-sage
+          ssh-key: ${{ secrets.SOURCE_KEY }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      - name: Read the recent TopDeck.gg EDH events, then the cEDH backtests (a failure keeps the stored events)
+        timeout-minutes: 15 # a full 180-day re-read is 26 requests, about 7 minutes
+        working-directory: pipeline
+        env:
+          TOPDECK_API_KEY: ${{ secrets.TOPDECK_API_KEY }}
+        run: |
+          uv sync --locked -q
+          # The log is public and the code is private: print only the job's own lines (counts, never a player name),
+          # never a stack trace.
+          log="$RUNNER_TEMP/cedh.log"
+          rc=0
+          { uv run python -m sideboard_sage_pipeline cedh && uv run python -m sideboard_sage_pipeline cedh-eval; } >"$log" 2>&1 || rc=$?
+          grep -E '^(cEDH|warning|note)' "$log" | cut -c1-200 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          [ "$rc" -eq 0 ] || { echo "FAILED (exit $rc): cedh"; exit "$rc"; }
+          # `cedh` keeps the stored events when TopDeck.gg fails but still rewrites meta.json with today's date. The
+          # source switched off in data/sources.yaml is not a failure: put the files back and commit nothing. Any other
+          # unread run (an outage, a missing key) fails here, so it is reported and the date-only change never lands.
+          if grep -q '^note: TopDeck.gg is not permitted' "$log"; then
+            git checkout -- ../data/cedh; echo "TopDeck.gg is off in data/sources.yaml; nothing read"; exit 0
+          fi
+          if grep -qE '^(warning: TopDeck.gg EDH unavailable|note: no TopDeck.gg client)' "$log"; then
+            echo "FAILED: TopDeck.gg EDH was not read"; exit 1
+          fi
+      - name: Commit data/cedh
+        env:
+          SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
+        run: |
+          git config user.name "calibration-bot"
+          git config user.email "calibration-bot@users.noreply.github.com"
+          git add -A data/cedh
+          if git diff --cached --quiet; then echo "nothing new"; exit 0; fi
+          git commit -q -m "data: refresh the cEDH events"
+          # The read key used for the checkout cannot push. The write key exists only in this step and is deleted at the end.
+          umask 077
+          printf '%s\n' "$SOURCE_WRITE_KEY" > "$RUNNER_TEMP/wkey"
+          trap 'rm -f "$RUNNER_TEMP/wkey"' EXIT # the key never outlives this step, even on a failed push
+          # GitHub's published ed25519 host key, pinned instead of trusting the first answer.
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$RUNNER_TEMP/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/wkey -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o StrictHostKeyChecking=yes"
+          REMOTE=git@github.com:1220mabe/sideboard-sage.git
+          # A push to main during the run rejects ours: replay the one commit on the newest main and retry.
+          for attempt in 1 2 3 4; do
+            if git push -q "$REMOTE" HEAD:main; then rm -f "$RUNNER_TEMP/wkey"; exit 0; fi
+            git fetch -q --depth=1 "$REMOTE" main && git rebase -q --onto FETCH_HEAD HEAD~1 || exit 1
+          done
+          rm -f "$RUNNER_TEMP/wkey"
+          exit 1
+      - name: Tell Discord when the run failed
+        if: failure()
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          [ -n "$HOOK" ] || exit 0
+          MSG="**cEDH daily: Failed**"$'\n'"Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true

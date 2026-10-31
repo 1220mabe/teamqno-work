@@ -20,6 +20,11 @@ on:
 
 permissions: {} # the checkout and the push use the deploy key; nothing here needs the workflow token
 
+# The cEDH lane is read by its own daily job (runner/cedh-daily.yml, data/cedh); the shared group keeps the two apart.
+concurrency:
+  group: calibrate-cedh
+  cancel-in-progress: false
+
 jobs:
   calibrate:
     runs-on: ubuntu-latest
@@ -151,16 +156,6 @@ jobs:
         timeout-minutes: 20
         working-directory: pipeline
         run: uv run python -m sideboard_sage_pipeline limited17-draft
-      - name: cEDH lane from TopDeck.gg EDH events (Issue #465; commanders and pod wins, a failure keeps the stored events)
-        if: github.event.schedule != '20 3 * * 4'
-        continue-on-error: true
-        timeout-minutes: 15
-        working-directory: pipeline
-        env:
-          TOPDECK_API_KEY: ${{ secrets.TOPDECK_API_KEY }}
-        run: |
-          uv run python -m sideboard_sage_pipeline cedh
-          uv run python -m sideboard_sage_pipeline cedh-eval
       - name: Warn if the history folder grows large
         if: github.event.schedule != '20 3 * * 4'
         run: |
@@ -240,7 +235,7 @@ jobs:
         run: |
           git config user.name "calibration-bot"
           git config user.email "calibration-bot@users.noreply.github.com"
-          git add -A history data/calibration.json data/sns_findings.json data/sns_side.json data/board_eval.json data/main_eval.json apps/web/src/data/cut-forward.json data/archetypes $(ls -d data/models data/answers_scoreboard.json data/names_coverage.json data/sources_candidates.json data/partners data/limited data/cedh 2>/dev/null)
+          git add -A history data/calibration.json data/sns_findings.json data/sns_side.json data/board_eval.json data/main_eval.json apps/web/src/data/cut-forward.json data/archetypes $(ls -d data/models data/answers_scoreboard.json data/names_coverage.json data/sources_candidates.json data/partners data/limited 2>/dev/null)
           # The analyst column, only when it survived the checks above (its files are gone otherwise).
           git add -A apps/web/content/articles apps/web/public/media
           if ! git diff --cached --quiet; then
