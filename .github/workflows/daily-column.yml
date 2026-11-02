@@ -25,12 +25,22 @@ jobs:
           ssh-key: ${{ secrets.SOURCE_KEY }}
           persist-credentials: false
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      # Node for the optional AI rewording (apps/web/scripts/column-bridge.mjs runs the .ts client directly, no install).
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
       - name: Write the column (fetches the recent days first; a failed source only means fewer events)
         id: column
         working-directory: pipeline
         env:
           TOPDECK_API_KEY: ${{ secrets.TOPDECK_API_KEY }}
           SPICERACK_API_KEY: ${{ secrets.SPICERACK_API_KEY }}
+          # Issue #467: off | shadow | publish. shadow publishes the template and keeps the draft for the blind read
+          # below; publish only after the owner's read (docs/PLAN.md). Any failure leaves the template.
+          COLUMN_DRAFTING: shadow
+          COLUMN_DRAFT_PROVIDER: workersai
+          CF_AI_TOKEN: ${{ secrets.CF_AI_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         run: |
           uv sync --locked
           uv run python -m sideboard_sage_pipeline cards
@@ -59,6 +69,13 @@ jobs:
           bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec vitest run src/lib/columnVoice.test.ts src/lib/columnGates.test.ts src/lib/articles.test.ts || { drop "a column test failed"; exit 0; }
           # The drawn thumbnail needs a browser and Scryfall; when either fails the generic image written by the generator stays.
           (bash "$GITHUB_WORKSPACE/scripts/quiet.sh" pnpm exec playwright install --with-deps chromium && node scripts/column-thumbs.mjs "$SLUG") || echo "::warning::column thumbnails not drawn; the generic image stands in"
+      - name: Send the shadow draft to the private Discord queue as a blind read (never the site)
+        if: steps.column.outputs.slug != ''
+        continue-on-error: true
+        working-directory: apps/web
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: node scripts/column-shadow.mjs
       - name: Commit the column when it survived the checks
         env:
           SOURCE_WRITE_KEY: ${{ secrets.SOURCE_WRITE_KEY }}
@@ -66,6 +83,7 @@ jobs:
           git config user.name "calibration-bot"
           git config user.email "calibration-bot@users.noreply.github.com"
           git add -A apps/web/content/articles apps/web/public/media
+          git add data/ai/column-ledger.json # the column's own Workers AI neurons (Issue #467)
           if ! git diff --cached --quiet; then
             git commit -m "data: daily column"
             umask 077
@@ -81,6 +99,19 @@ jobs:
             rm -f "$RUNNER_TEMP/wkey"
             exit 1
           fi
+      # Issue #516: on Mondays, the week's owner-interview questions go to the private queue as a reminder (no file is
+      # written here; the owner answers in a session, docs/OPERATIONS.md "Owner interview"). Never blocks the run.
+      - name: Remind the owner of this week's interview questions (Mondays, private Discord queue)
+        if: success()
+        continue-on-error: true
+        working-directory: pipeline
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          [ -n "$HOOK" ] && [ "$(date -u +%u)" = "1" ] || exit 0
+          QS=$(uv run python -m sideboard_sage_pipeline owner-interview --print-only | head -c 1800)
+          MSG="**Owner interview: this week's questions**"$'\n'"$QS"
+          curl -fsS --max-time 15 -H 'Content-Type: application/json' -d "$(jq -n --arg c "$MSG" '{content:$c, allowed_mentions:{parse:[]}}')" "$HOOK" || true
       - name: Tell Discord when the run failed
         if: failure()
         env:

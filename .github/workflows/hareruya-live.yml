@@ -1,15 +1,15 @@
 name: Hareruya live
 
-# Twice a day: read new Hareruya deck pages and result pages (at most 300 requests a run, 6 s or more apart, each page
+# Three times a day: read new Hareruya deck pages and result pages (at most 300 requests a run, 6 s or more apart, each page
 # once, the recent window only; rules in docs/LEGAL_AND_ASSETS.md, Hareruya row) and commit the small store in
 # data/hareruya. The deploy that runs every two hours reads that store and makes no Hareruya request, so this job (about
 # 30 minutes when there is work) can never slow or block a deploy. A 403, 429, captcha or bot check ends the run with no
-# retry; the store records it and the deploy flags the source stale. Timed to finish, normally, before the 02:20 and
-# 14:20 deploys (a longer run is picked up by the next one).
+# retry; the store records it and the deploy flags the source stale. Timed to finish, normally, before the 06:20, 14:20
+# and 22:20 deploys (a longer run is picked up by the next one).
 # See docs/DEPLOY.md, Per-source fallback.
 on:
   schedule:
-    - cron: "45 1,13 * * *"
+    - cron: "45 5,13,21 * * *"
   workflow_dispatch:
 
 permissions: {} # the checkout and the push use the deploy key; nothing here needs the workflow token

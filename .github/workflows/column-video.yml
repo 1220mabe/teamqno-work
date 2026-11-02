@@ -1,8 +1,9 @@
 name: Column film
 
 # Daily, after the daily column (Issue #505, docs/SPEC-column-video.md): render the newest column's film in English and
-# Japanese, 16:9 and 9:16, keep the files as this run's artifact, and upload the 16:9 films to YouTube as private drafts.
-# The owner publishes a draft by hand; a later run sees it public and puts it on the column page (video/scripts/upload.py
+# Japanese, 16:9 and 9:16, keep the files as this run's artifact, and upload the 16:9 films to YouTube private with
+# YouTube's own scheduled publish at the next 20:00 JST (fully automatic, owner 2026-11-01), set up with tags, thumbnail,
+# captions and playlist (Issue #537). A later run sees a film public and puts it on the column page (video/scripts/upload.py
 # promote). Without the three YOUTUBE_* secrets the upload steps print a notice and do nothing. Never blocks a deploy.
 on:
   schedule:
@@ -26,7 +27,7 @@ jobs:
           ssh-key: ${{ secrets.SOURCE_KEY }}
           persist-credentials: false
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
-      - name: Put the films the owner has published on their column pages
+      - name: Put the films now public on their column pages
         continue-on-error: true # a YouTube hiccup here never stops today's film
         env:
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
@@ -70,7 +71,7 @@ jobs:
             video/renders/column-*-${{ steps.pick.outputs.slug }}.srt
           retention-days: 14
           if-no-files-found: ignore
-      - name: Upload the 16:9 films as private drafts
+      - name: Upload the 16:9 films, private and scheduled for 20:00 JST
         if: steps.pick.outputs.slug != ''
         env:
           SLUG: ${{ steps.pick.outputs.slug }}
