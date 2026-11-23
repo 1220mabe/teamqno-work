@@ -1,0 +1,42 @@
+name: Buffer pictures probe
+
+# Asks Buffer whether one X post may carry more than 4 pictures. It creates ONE DRAFT per picture count (5, 6, 8) with
+# saveToDraft, so nothing is scheduled or published, then deletes each draft it made. Run by hand only (Issue #650).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BUFFER_TOKEN: ${{ secrets.BUFFER_TOKEN }}
+      BUFFER_CHANNEL_ID: ${{ secrets.BUFFER_CHANNEL_ID }}
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Create and delete probe drafts
+        run: |
+          cat > probe.mjs <<'JS'
+          const URL_ = "https://api.buffer.com";
+          const H = { "content-type": "application/json", authorization: `Bearer ${process.env.BUFFER_TOKEN}` };
+          const gql = async (query, variables) => {
+            const r = await fetch(URL_, { method: "POST", headers: H, body: JSON.stringify({ query, variables }) });
+            return { status: r.status, body: await r.json().catch(() => null) };
+          };
+          const CREATE = `mutation C($input: CreatePostInput!) { createPost(input: $input) { ... on PostActionSuccess { post { id } } ... on MutationError { message } } }`;
+          const DELETE = `mutation D($input: DeletePostInput!) { deletePost(input: $input) { __typename ... on MutationError { message } } }`;
+          for (const n of [4, 5, 6, 8]) {
+            const assets = Array.from({ length: n }, (_, i) => ({ image: { url: `https://teamqno.work/og/guide.png?probe=${i + 1}` } }));
+            const input = { text: `Probe draft with ${n} pictures (not published, deleted right away)`, channelId: process.env.BUFFER_CHANNEL_ID, schedulingType: "automatic", mode: "addToQueue", saveToDraft: true, assets };
+            const c = await gql(CREATE, { input });
+            const id = c.body?.data?.createPost?.post?.id;
+            console.log(JSON.stringify({ pictures: n, http: c.status, id: id ?? null, errors: c.body?.errors ?? null, message: c.body?.data?.createPost?.message ?? null }));
+            if (id) console.log(JSON.stringify({ deleted: id, result: (await gql(DELETE, { input: { id } })).body }));
+          }
+          JS
+          node probe.mjs
