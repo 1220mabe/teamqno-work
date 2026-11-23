@@ -69,6 +69,8 @@ jobs:
             video/renders/column-*-${{ steps.pick.outputs.slug }}-*.jpg
             video/renders/column-*-${{ steps.pick.outputs.slug }}.vtt
             video/renders/column-*-${{ steps.pick.outputs.slug }}.srt
+            video/renders/column-*-${{ steps.pick.outputs.slug }}-short.vtt
+            video/renders/column-*-${{ steps.pick.outputs.slug }}-short.srt
           retention-days: 14
           if-no-files-found: ignore
       - name: Upload the 16:9 films, private and scheduled for 20:00 JST
@@ -79,6 +81,14 @@ jobs:
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
           YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
         run: python3 video/scripts/upload.py draft "$SLUG"
+      - name: Upload the 9:16 Short, private and scheduled (only while the repository variable COLUMN_SHORTS is true)
+        if: steps.pick.outputs.slug != '' && vars.COLUMN_SHORTS == 'true'
+        env:
+          SLUG: ${{ steps.pick.outputs.slug }}
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+        run: python3 video/scripts/upload.py draft "$SLUG" --shorts
       - name: Commit the upload record, posters and site entries
         if: ${{ !cancelled() }}
         env:
